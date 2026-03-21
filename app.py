@@ -1,4 +1,4 @@
-"""X Auto Poster web application."""
+"""Simple local X posting app that reuses the existing Chrome profile."""
 
 from __future__ import annotations
 
@@ -7,61 +7,45 @@ import mimetypes
 import os
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-import poster
-
 try:
-    from google.cloud import scheduler_v1, storage
+    from google.cloud import storage
 except ImportError:
-    scheduler_v1 = None
     storage = None
 
 
 app = Flask(__name__)
 
 JST = timezone(timedelta(hours=9))
-VERSION = "1.4.0"
-MAX_LOGS = 200
+VERSION = "1.6.0"
+MAX_LOGS = 20
+STATE_FILE = "state.json"
+LOG_FILE = "post_log.json"
 
 PROJECT_ID = os.environ.get("GCP_PROJECT", "local-dev")
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "").strip()
-SCHEDULER_JOB_NAME = os.environ.get("SCHEDULER_JOB_NAME", "").strip()
-SCHEDULER_LOCATION = os.environ.get("SCHEDULER_LOCATION", "asia-northeast1")
-SERVICE_URL = os.environ.get("SERVICE_URL", "").strip()
-SERVICE_ACCOUNT = os.environ.get(
-    "SERVICE_ACCOUNT",
-    f"x-auto-poster@{PROJECT_ID}.iam.gserviceaccount.com",
-)
 DATA_DIR = Path(os.environ.get("APP_DATA_DIR", Path(__file__).with_name("data")))
 LOCAL_MODE = os.environ.get("LOCAL_MODE", "").lower() in {"1", "true", "yes"} or not GCS_BUCKET
+
 EXISTING_PROFILE_SCRIPT = Path(__file__).with_name("existing_profile_media_post.py")
 DEFAULT_CHROME_PROFILE = os.environ.get("CHROME_PROFILE_DIRECTORY", "Default").strip() or "Default"
-DEFAULT_PROFILE_HANDLE = os.environ.get("X_PROFILE_HANDLE", "").strip()
+DEFAULT_PROFILE_HANDLE = os.environ.get("X_PROFILE_HANDLE", "").strip().lstrip("@")
+VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "webm", "mkv"}
 
-_gcs_client = None
-
-DEFAULT_ACCOUNT = {
-    "id": "default",
-    "label": "アカウント 1",
-    "username": "",
-    "password": "",
-    "content": "おはようございます。",
-    "hour": 7,
-    "minute": 0,
-    "enabled": True,
-    "last_post_date": "",
-    "discord_webhook": "",
+DEFAULT_STATE = {
+    "content": "",
     "media_path": "",
     "media_filename": "",
+    "last_post_at": "",
+    "profile_handle": DEFAULT_PROFILE_HANDLE,
 }
 
-DEFAULT_CONFIG = {"timezone": "Asia/Tokyo", "accounts": [DEFAULT_ACCOUNT.copy()]}
+_gcs_client = None
 
 
 def ensure_local_dirs() -> None:
@@ -77,38 +61,10 @@ def storage_mode_label() -> str:
     return "LOCAL" if LOCAL_MODE else "GCS"
 
 
-def next_run_text(hour: int, minute: int, enabled: bool) -> str:
-    if not enabled:
-        return "停止中"
-    current = now_jst()
-    next_run = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if next_run <= current:
-        next_run += timedelta(days=1)
-    return next_run.strftime("%Y-%m-%d %H:%M JST")
-
-
-def normalize_account(account: dict[str, Any], index: int) -> dict[str, Any]:
-    merged = {**DEFAULT_ACCOUNT, **account}
-    merged["id"] = merged.get("id") or f"acct{index}"
-    merged["label"] = (merged.get("label") or f"アカウント {index + 1}").strip()
-    merged["username"] = (merged.get("username") or "").strip()
-    merged["content"] = merged.get("content") or ""
-    merged["hour"] = max(0, min(23, int(merged.get("hour", 7))))
-    merged["minute"] = max(0, min(59, int(merged.get("minute", 0))))
-    merged["enabled"] = bool(merged.get("enabled", True))
-    merged["discord_webhook"] = (merged.get("discord_webhook") or "").strip()
-    merged["media_path"] = merged.get("media_path") or ""
-    merged["media_filename"] = merged.get("media_filename") or ""
-    merged["password_set"] = bool(merged.get("password"))
-    merged["next_run"] = next_run_text(merged["hour"], merged["minute"], merged["enabled"])
-    merged["content_length"] = len(merged["content"])
-    return merged
-
-
 def gcs():
     global _gcs_client
     if storage is None:
-        raise RuntimeError("google-cloud-storage がインストールされていません")
+        raise RuntimeError("google-cloud-storage is not installed.")
     if _gcs_client is None:
         _gcs_client = storage.Client()
     return _gcs_client
@@ -137,27 +93,32 @@ def data_read(path: str, default: Any = None):
 
 def data_write(path: str, data: Any) -> None:
     if LOCAL_MODE:
-        file_path = local_json_path(path)
-        file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        local_json_path(path).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         return
     blob = gcs().bucket(GCS_BUCKET).blob(path)
-    blob.upload_from_string(json.dumps(data, ensure_ascii=False, indent=2), content_type="application/json")
+    blob.upload_from_string(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        content_type="application/json",
+    )
 
 
-def media_local_path(idx: int, filename: str) -> Path:
-    ext = Path(filename).suffix.lower() or ".bin"
+def media_local_path(filename: str) -> Path:
     ensure_local_dirs()
-    return DATA_DIR / "media" / f"acct{idx}_current{ext}"
+    ext = Path(filename).suffix.lower() or ".bin"
+    return DATA_DIR / "media" / f"current_media{ext}"
 
 
-def save_uploaded_media(idx: int, upload) -> tuple[str, str]:
+def save_uploaded_media(upload) -> tuple[str, str]:
     filename = upload.filename or "media.bin"
     if LOCAL_MODE:
-        destination = media_local_path(idx, filename)
+        destination = media_local_path(filename)
         upload.save(destination)
         return str(destination), filename
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
-    gcs_path = f"media/acct{idx}_current.{ext}"
+    gcs_path = f"media/current_media.{ext}"
     blob = gcs().bucket(GCS_BUCKET).blob(gcs_path)
     blob.upload_from_file(upload.stream, content_type=upload.content_type or "application/octet-stream")
     return gcs_path, filename
@@ -193,64 +154,59 @@ def delete_media_file(stored_path: str) -> None:
         pass
 
 
-def fetch_media_to_runtime(idx: int, stored_path: str) -> str | None:
-    if not stored_path:
+def is_video_file(filename: str) -> bool:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return ext in VIDEO_EXTENSIONS
+
+
+def legacy_state() -> dict[str, Any] | None:
+    config = data_read("config.json", None)
+    if not config:
         return None
-    if LOCAL_MODE:
-        return stored_path if Path(stored_path).exists() else None
-    ensure_local_dirs()
-    ext = stored_path.rsplit(".", 1)[-1] if "." in stored_path else "bin"
-    local_path = DATA_DIR / "media" / f"runtime_media_{idx}.{ext}"
-    gcs().bucket(GCS_BUCKET).blob(stored_path).download_to_filename(str(local_path))
-    return str(local_path)
-
-
-def send_discord(webhook_url: str, success: bool, content: str, message: str) -> None:
-    if not webhook_url:
-        return
-    icon = "[OK]" if success else "[NG]"
-    status = "Post succeeded" if success else "Post failed"
-    payload = json.dumps(
-        {
-            "content": (
-                f"{icon} {status}\n"
-                f"Content: {content}\n"
-                f"Detail: {message}\n"
-                f"Time: {now_jst().strftime('%Y-%m-%d %H:%M:%S')} JST"
-            )
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    urllib.request.urlopen(req, timeout=10)
-
-
-def get_config() -> dict[str, Any]:
-    saved = data_read("config.json") or {}
-    config = {**DEFAULT_CONFIG, **saved}
     accounts = config.get("accounts") or []
     if not accounts:
-        accounts = [DEFAULT_ACCOUNT.copy()]
-    config["accounts"] = [normalize_account(account, idx) for idx, account in enumerate(accounts)]
-    return config
+        return None
+    account = accounts[0]
+    return {
+        "content": account.get("content") or "",
+        "media_path": account.get("media_path") or "",
+        "media_filename": account.get("media_filename") or "",
+        "last_post_at": account.get("last_post_date") or "",
+        "profile_handle": (account.get("profile_handle") or DEFAULT_PROFILE_HANDLE).lstrip("@"),
+    }
 
 
-def save_config(config: dict[str, Any]) -> None:
-    raw_config = {"timezone": config.get("timezone", "Asia/Tokyo"), "accounts": []}
-    for account in config.get("accounts", []):
-        raw_config["accounts"].append({key: account.get(key, DEFAULT_ACCOUNT.get(key)) for key in DEFAULT_ACCOUNT})
-    data_write("config.json", raw_config)
+def get_state() -> dict[str, Any]:
+    saved = data_read(STATE_FILE, None)
+    if saved is None:
+        saved = legacy_state() or {}
+    state = {**DEFAULT_STATE, **saved}
+    state["content"] = state.get("content") or ""
+    state["media_path"] = state.get("media_path") or ""
+    state["media_filename"] = state.get("media_filename") or ""
+    state["last_post_at"] = state.get("last_post_at") or ""
+    state["profile_handle"] = (state.get("profile_handle") or DEFAULT_PROFILE_HANDLE).lstrip("@")
+    state["has_media"] = bool(state["media_path"] and state["media_filename"])
+    state["is_video"] = is_video_file(state["media_filename"])
+    return state
+
+
+def save_state(state: dict[str, Any]) -> None:
+    payload = {
+        "content": state.get("content", ""),
+        "media_path": state.get("media_path", ""),
+        "media_filename": state.get("media_filename", ""),
+        "last_post_at": state.get("last_post_at", ""),
+        "profile_handle": (state.get("profile_handle") or DEFAULT_PROFILE_HANDLE).lstrip("@"),
+    }
+    data_write(STATE_FILE, payload)
 
 
 def get_logs() -> list[dict[str, Any]]:
-    return data_read("post_log.json") or []
+    return data_read(LOG_FILE, []) or []
 
 
-def add_log(success: bool, message: str, content: str, account_label: str = "") -> None:
+def add_log(success: bool, message: str, content: str, media_filename: str) -> None:
     logs = get_logs()
     logs.insert(
         0,
@@ -259,77 +215,14 @@ def add_log(success: bool, message: str, content: str, account_label: str = "") 
             "success": success,
             "message": message,
             "content": content,
-            "account": account_label,
+            "media_filename": media_filename,
         },
     )
-    data_write("post_log.json", logs[:MAX_LOGS])
-
-
-def scheduler_job_path() -> str:
-    return f"projects/{PROJECT_ID}/locations/{SCHEDULER_LOCATION}/jobs/{SCHEDULER_JOB_NAME}"
-
-
-def update_scheduler(hour: int, minute: int, tz_name: str, enabled: bool):
-    cron = f"{minute} {hour} * * *"
-    if LOCAL_MODE:
-        return cron, "ローカルモードのため Scheduler 更新はスキップしました。"
-    if not SCHEDULER_JOB_NAME or not SERVICE_URL:
-        return None, "SCHEDULER_JOB_NAME または SERVICE_URL が未設定です。"
-    if scheduler_v1 is None:
-        return None, "google-cloud-scheduler がインストールされていません。"
-    try:
-        client = scheduler_v1.CloudSchedulerClient()
-        job = scheduler_v1.Job(
-            name=scheduler_job_path(),
-            schedule=cron,
-            time_zone=tz_name,
-            http_target=scheduler_v1.HttpTarget(
-                uri=f"{SERVICE_URL}/post",
-                http_method=scheduler_v1.HttpMethod.POST,
-                oidc_token=scheduler_v1.OidcToken(
-                    service_account_email=SERVICE_ACCOUNT,
-                    audience=SERVICE_URL,
-                ),
-            ),
-        )
-        client.update_job(job=job, update_mask={"paths": ["schedule", "time_zone", "http_target"]})
-        if enabled:
-            client.resume_job(name=scheduler_job_path())
-        else:
-            client.pause_job(name=scheduler_job_path())
-        return cron, None
-    except Exception as exc:
-        return None, str(exc)
-
-
-def clear_cookie_store(idx: int) -> None:
-    data_write(f"cookies_{idx}.json", [])
-
-
-def exported_config() -> dict[str, Any]:
-    config = get_config()
-    return {
-        "version": VERSION,
-        "exported_at": now_jst().strftime("%Y-%m-%d %H:%M:%S JST"),
-        "config": {
-            "timezone": config.get("timezone", "Asia/Tokyo"),
-            "accounts": [{key: account.get(key, "") for key in DEFAULT_ACCOUNT} for account in config["accounts"]],
-        },
-    }
+    data_write(LOG_FILE, logs[:MAX_LOGS])
 
 
 def existing_profile_available() -> bool:
     return LOCAL_MODE and os.name == "nt" and EXISTING_PROFILE_SCRIPT.exists()
-
-
-def derive_profile_handle(account: dict[str, Any]) -> str:
-    configured = (account.get("profile_handle") or "").strip().lstrip("@")
-    if configured:
-        return configured
-    username = (account.get("username") or "").strip().lstrip("@")
-    if username:
-        return username
-    return DEFAULT_PROFILE_HANDLE or "meetyoursxey"
 
 
 def parse_json_result(text: str) -> dict[str, Any] | None:
@@ -342,20 +235,9 @@ def parse_json_result(text: str) -> dict[str, Any] | None:
     return None
 
 
-def run_existing_profile_post(account: dict[str, Any], content: str, media_path: str | None) -> tuple[bool, str]:
-    args = [
-        sys.executable,
-        str(EXISTING_PROFILE_SCRIPT),
-        "--profile-directory",
-        DEFAULT_CHROME_PROFILE,
-        "--profile-handle",
-        derive_profile_handle(account),
-    ]
-    if content:
-        args.extend(["--text", content])
-    if media_path:
-        args.extend(["--media-path", media_path])
-
+def run_existing_profile_command(extra_args: list[str]) -> tuple[bool, str]:
+    args = [sys.executable, str(EXISTING_PROFILE_SCRIPT), "--profile-directory", DEFAULT_CHROME_PROFILE]
+    args.extend(extra_args)
     completed = subprocess.run(
         args,
         cwd=str(Path(__file__).resolve().parent),
@@ -363,319 +245,625 @@ def run_existing_profile_post(account: dict[str, Any], content: str, media_path:
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=240,
+        timeout=300,
     )
     payload = parse_json_result(completed.stdout) or parse_json_result(completed.stderr) or {}
     message = (
         payload.get("message")
         or completed.stderr.strip()
         or completed.stdout.strip()
-        or "既存プロフィール経由の投稿に失敗しました。"
+        or "既存Chrome経由の操作に失敗しました。"
     )
     success = bool(payload.get("success")) if payload else completed.returncode == 0
     return success and completed.returncode == 0, message
 
 
 HTML = """<!DOCTYPE html>
-<html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>X Auto Poster</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Segoe UI",sans-serif;background:linear-gradient(180deg,#081120 0%,#10192e 100%);color:#e5eefc;min-height:100vh}
-.shell{max-width:1080px;margin:0 auto;padding:24px 18px 40px}.card{background:rgba(15,23,42,.92);border:1px solid #23324d;border-radius:18px;box-shadow:0 16px 40px rgba(0,0,0,.24);padding:20px}
-.hero{margin-bottom:18px}.top{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.badge{background:#1d9bf0;color:#fff;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:700}.muted{color:#9bb0d1}
-.summary,.grid,.form-grid,.side-list,.toolbar,.tabs{display:grid;gap:12px}.summary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:18px}.grid{grid-template-columns:1.5fr 1fr}.form-grid{grid-template-columns:1fr 1fr}.form-full{grid-column:1/-1}
-.metric,.side-item,.media-box{background:#0c1627;border:1px solid #20314d;border-radius:14px;padding:14px}.metric .label,.tiny,label{color:#88a0c9;font-size:12px}.metric .value{font-size:22px;font-weight:700;margin-top:6px}
-.toolbar,.tabs{grid-auto-flow:column;grid-auto-columns:max-content;overflow:auto;padding-bottom:4px}.tab,.btn,button{border:none;border-radius:12px;padding:10px 14px;font-size:14px;font-weight:700;cursor:pointer}
-.tab{background:transparent;color:#9eb2d7;border:1px solid #2a3b59}.tab.active{background:#1d9bf0;color:#fff;border-color:#1d9bf0}.btn-primary{background:#1d9bf0;color:#fff}.btn-secondary{background:#22314b;color:#d7e4fa}.btn-danger{background:#d84f68;color:#fff}
-input[type=text],input[type=password],input[type=number],input[type=url],textarea{width:100%;background:#091221;border:1px solid #23324d;color:#e7f0ff;border-radius:12px;padding:11px 12px;font-size:14px}textarea{min-height:120px;resize:vertical}
-.inline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.status{margin-top:16px;border-radius:14px;padding:12px 14px;display:none}.ok{background:#082515;border:1px solid #1f8d4d;color:#97f4b9}.err{background:#2b1014;border:1px solid #d84f68;color:#ffb4c1}.info{background:#0a1d34;border:1px solid #2474c7;color:#a9d1ff}
-.media-preview{margin-top:10px;border-radius:12px;overflow:hidden;border:1px solid #22314b;background:#050c17}.media-preview img,.media-preview video{width:100%;max-height:260px;object-fit:contain;display:block}.log-table{width:100%;border-collapse:collapse}.log-table th,.log-table td{text-align:left;padding:10px 8px;border-bottom:1px solid #1a2942;vertical-align:top;font-size:13px}
-.pill{display:inline-block;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:700}.pill-ok{background:#0d3620;color:#9af2ba}.pill-ng{background:#40151c;color:#ffb8c4}@media (max-width:860px){.grid,.form-grid{grid-template-columns:1fr}}
-</style></head>
-<body><div class="shell">
-<div class="card hero"><div class="top"><h1>X 自動投稿ツール</h1><span class="badge">v{{ version }}</span><span class="badge">{{ storage_mode }}</span><span class="muted">プロジェクト: {{ project }}</span></div>
-<p class="muted" style="margin-top:10px;">アカウント管理、投稿スケジュール、Webhook テスト、Cookie クリア、設定の書き出しと読み込みを1画面で行えます。</p>
-<div class="summary"><div class="metric"><div class="label">アカウント数</div><div class="value">{{ config.accounts|length }}</div></div><div class="metric"><div class="label">有効数</div><div class="value">{{ enabled_count }}</div></div><div class="metric"><div class="label">ログ件数</div><div class="value">{{ logs|length }}</div></div><div class="metric"><div class="label">タイムゾーン</div><div class="value" style="font-size:18px;">{{ config.timezone }}</div></div></div>
-<div class="toolbar" style="margin-top:18px;"><button class="btn btn-primary" onclick="addAccount()">アカウント追加</button><button class="btn btn-secondary" onclick="exportConfig()">設定を書き出し</button><label class="btn btn-secondary">設定を読み込み<input id="import-file" type="file" accept="application/json" style="display:none" onchange="importConfig(this)"></label></div></div>
-<div class="grid"><div class="card"><h2 style="margin-bottom:14px;">アカウント設定</h2><div class="tabs">{% for acct in config.accounts %}<button class="tab {% if loop.index0 == 0 %}active{% endif %}" id="tab-{{ loop.index0 }}" onclick="switchAccount({{ loop.index0 }})">{{ acct.label }}</button>{% endfor %}</div>
-{% for acct in config.accounts %}<div class="account-panel" id="panel-{{ loop.index0 }}" style="{% if loop.index0 > 0 %}display:none{% endif %};padding-top:18px;border-top:1px solid #20314d;"><div class="form-grid">
-<div><label>表示名</label><input type="text" id="label-{{ loop.index0 }}" value="{{ acct.label }}"></div>
-<div><label>ユーザー名</label><input type="text" id="username-{{ loop.index0 }}" value="{{ acct.username }}" placeholder="@ なしで入力"></div>
-<div><label>パスワード</label><input type="password" id="password-{{ loop.index0 }}" placeholder="{% if acct.password_set %}保存済みです。変更時のみ入力してください。{% else %}パスワードを入力{% endif %}"></div>
-<div><label>Discord Webhook</label><input type="url" id="discord-{{ loop.index0 }}" value="{{ acct.discord_webhook }}" placeholder="https://discord.com/api/webhooks/..."></div>
-<div class="form-full"><label>投稿内容</label><textarea id="content-{{ loop.index0 }}" oninput="updateCount({{ loop.index0 }})">{{ acct.content }}</textarea><div class="inline tiny" style="margin-top:6px;"><span id="count-{{ loop.index0 }}">{{ acct.content_length }}</span><span>文字</span><span>次回実行: <strong id="next-run-{{ loop.index0 }}">{{ acct.next_run }}</strong></span><span>最終成功日: <strong>{{ acct.last_post_date or '未実行' }}</strong></span></div></div>
-<div><label>時 (JST)</label><input type="number" id="hour-{{ loop.index0 }}" min="0" max="23" value="{{ acct.hour }}" oninput="updateRunPreview({{ loop.index0 }})"></div>
-<div><label>分 (JST)</label><input type="number" id="minute-{{ loop.index0 }}" min="0" max="59" value="{{ acct.minute }}" oninput="updateRunPreview({{ loop.index0 }})"></div>
-<div class="form-full"><label><input type="checkbox" id="enabled-{{ loop.index0 }}" {% if acct.enabled %}checked{% endif %} onchange="updateRunPreview({{ loop.index0 }})"> 投稿を有効にする</label></div>
-<div class="form-full"><label>メディア</label><div class="media-box">{% if acct.media_filename %}<div class="tiny">現在のファイル: {{ acct.media_filename }}</div><div class="media-preview">{% set ext = acct.media_filename.rsplit('.', 1)[-1].lower() if '.' in acct.media_filename else '' %}{% if ext in ['mp4','mov','avi','webm','mkv'] %}<video src="/media/{{ loop.index0 }}" controls></video>{% else %}<img src="/media/{{ loop.index0 }}" alt="preview">{% endif %}</div>{% else %}<div class="tiny">アップロード済みのメディアはありません。</div>{% endif %}<div class="toolbar" style="margin-top:10px;"><label class="btn btn-secondary">メディアをアップロード<input type="file" accept="image/*,video/*" style="display:none" onchange="uploadMedia(this, {{ loop.index0 }})"></label><button class="btn btn-secondary" onclick="clearMedia({{ loop.index0 }})">メディア削除</button><button class="btn btn-secondary" onclick="clearCookies({{ loop.index0 }})">Cookie クリア</button><button class="btn btn-secondary" onclick="testWebhook({{ loop.index0 }})">Webhook テスト</button></div></div></div>
-</div><div class="toolbar" style="margin-top:16px;"><button class="btn btn-primary" onclick="saveSettings({{ loop.index0 }}, event)">設定を保存</button><button class="btn btn-primary" onclick="manualPost({{ loop.index0 }}, event)">今すぐ投稿</button>{% if existing_profile_available %}<button class="btn btn-secondary" onclick="existingProfilePost({{ loop.index0 }}, event)">既存Chromeで投稿</button>{% endif %}<button class="btn btn-secondary" onclick="duplicateAccount({{ loop.index0 }})">アカウント複製</button>{% if config.accounts|length > 1 %}<button class="btn btn-danger" onclick="deleteAccount({{ loop.index0 }})">アカウント削除</button>{% endif %}</div>{% if existing_profile_available %}<div class="tiny" style="margin-top:10px;">既存Chrome投稿は Chrome を再起動します。Web アプリを Chrome で開いている場合は画面が閉じることがあります。</div>{% endif %}</div>{% endfor %}
-<div id="status" class="status"></div></div>
-<div class="card"><h2 style="margin-bottom:14px;">サービス情報</h2><div class="side-list"><div class="side-item"><div class="tiny">サービス URL</div><div style="margin-top:6px;word-break:break-all;">{{ service_url or '未設定' }}</div></div><div class="side-item"><div class="tiny">ストレージバケット</div><div style="margin-top:6px;word-break:break-all;">{{ gcs_bucket or 'ローカルデータフォルダ' }}</div></div><div class="side-item"><div class="tiny">スケジューラ</div><div style="margin-top:6px;">Cloud Scheduler の自動更新はアカウント 1 のみ対象です。</div></div></div>
-<h2 style="margin:18px 0 14px;">投稿ログ</h2><div style="overflow:auto;"><table class="log-table"><thead><tr><th>日時</th><th>アカウント</th><th>内容</th><th>結果</th><th>詳細</th></tr></thead><tbody>{% if logs %}{% for log in logs %}<tr><td>{{ log.time }}</td><td>{{ log.account }}</td><td>{{ log.content }}</td><td>{% if log.success %}<span class="pill pill-ok">成功</span>{% else %}<span class="pill pill-ng">失敗</span>{% endif %}</td><td>{{ log.message }}</td></tr>{% endfor %}{% else %}<tr><td colspan="5" class="muted">まだログはありません。</td></tr>{% endif %}</tbody></table></div></div></div></div>
-<script>
-function showStatus(m,t){const e=document.getElementById('status');e.textContent=m;e.className='status '+t;e.style.display='block';window.scrollTo({top:0,behavior:'smooth'});}
-function switchAccount(i){document.querySelectorAll('.account-panel').forEach((p,n)=>p.style.display=n===i?'':'none');document.querySelectorAll('.tab').forEach((t,n)=>t.classList.toggle('active',n===i));}
-function collectPayload(i){return{label:document.getElementById('label-'+i).value,username:document.getElementById('username-'+i).value,password:document.getElementById('password-'+i).value,content:document.getElementById('content-'+i).value,hour:parseInt(document.getElementById('hour-'+i).value||'0',10),minute:parseInt(document.getElementById('minute-'+i).value||'0',10),enabled:document.getElementById('enabled-'+i).checked,discord_webhook:document.getElementById('discord-'+i).value};}
-function updateCount(i){document.getElementById('count-'+i).textContent=document.getElementById('content-'+i).value.length;}
-function updateRunPreview(i){const enabled=document.getElementById('enabled-'+i).checked;const hour=parseInt(document.getElementById('hour-'+i).value||'0',10);const minute=parseInt(document.getElementById('minute-'+i).value||'0',10);if(!enabled){document.getElementById('next-run-'+i).textContent='停止中';return;}const now=new Date();const jst=new Date(now.toLocaleString('en-US',{timeZone:'Asia/Tokyo'}));const next=new Date(jst);next.setHours(hour,minute,0,0);if(next<=jst)next.setDate(next.getDate()+1);document.getElementById('next-run-'+i).textContent=next.getFullYear()+'-'+String(next.getMonth()+1).padStart(2,'0')+'-'+String(next.getDate()).padStart(2,'0')+' '+String(next.getHours()).padStart(2,'0')+':'+String(next.getMinutes()).padStart(2,'0')+' JST';}
-async function saveSettings(i,e){const b=e.currentTarget;b.disabled=true;showStatus('設定を保存しています...','info');try{const r=await fetch('/settings/'+i,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectPayload(i))});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'保存に失敗しました');showStatus(d.message,'ok');document.getElementById('tab-'+i).textContent=document.getElementById('label-'+i).value||('アカウント '+(i+1));document.getElementById('password-'+i).value='';}catch(err){showStatus(err.message,'err');}b.disabled=false;}
-async function manualPost(i,e){if(!confirm('このアカウントで今すぐ投稿しますか？'))return;const b=e.currentTarget;b.disabled=true;showStatus('投稿を実行しています。少し時間がかかることがあります...','info');try{const r=await fetch('/post/'+i+'?manual=1',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'投稿に失敗しました');showStatus(d.message,'ok');setTimeout(()=>location.reload(),1200);}catch(err){showStatus(err.message,'err');}b.disabled=false;}
-async function existingProfilePost(i,e){if(!confirm('既存の Chrome プロフィールで投稿します。Chrome が再起動することがあります。続けますか？'))return;const b=e.currentTarget;b.disabled=true;showStatus('既存Chrome経由で投稿を開始しています。Chrome を使っている場合は画面が切り替わることがあります...','info');try{const r=await fetch('/post-existing/'+i,{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'既存Chrome経由の投稿に失敗しました');showStatus(d.message,'ok');setTimeout(()=>location.reload(),1600);}catch(err){showStatus(err.message,'err');}b.disabled=false;}
-async function uploadMedia(input,i){const f=input.files[0];if(!f)return;const form=new FormData();form.append('file',f);showStatus('メディアをアップロードしています...','info');try{const r=await fetch('/upload/'+i,{method:'POST',body:form});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'アップロードに失敗しました');showStatus(d.message,'ok');setTimeout(()=>location.reload(),800);}catch(err){showStatus(err.message,'err');}}
-async function clearMedia(i){if(!confirm('現在のメディアを削除しますか？'))return;const r=await fetch('/media/clear/'+i,{method:'POST'});const d=await r.json();if(d.ok)location.reload();else showStatus(d.error||'メディア削除に失敗しました','err');}
-async function clearCookies(i){if(!confirm('このアカウントの保存済み Cookie を削除しますか？'))return;const r=await fetch('/cookies/clear/'+i,{method:'POST'});const d=await r.json();if(d.ok)showStatus(d.message,'ok');else showStatus(d.error||'Cookie の削除に失敗しました','err');}
-async function testWebhook(i){showStatus('Webhook テストを送信しています...','info');const r=await fetch('/webhook/test/'+i,{method:'POST'});const d=await r.json();if(d.ok)showStatus(d.message,'ok');else showStatus(d.error||'Webhook テストに失敗しました','err');}
-async function addAccount(){const r=await fetch('/accounts/add',{method:'POST'});const d=await r.json();if(d.ok)location.reload();else showStatus(d.error||'アカウント追加に失敗しました','err');}
-async function duplicateAccount(i){const r=await fetch('/accounts/duplicate/'+i,{method:'POST'});const d=await r.json();if(d.ok)location.reload();else showStatus(d.error||'アカウント複製に失敗しました','err');}
-async function deleteAccount(i){if(!confirm('このアカウントを削除しますか？'))return;const r=await fetch('/accounts/'+i,{method:'DELETE'});const d=await r.json();if(d.ok)location.reload();else showStatus(d.error||'アカウント削除に失敗しました','err');}
-function exportConfig(){window.location.href='/export';}
-async function importConfig(input){const f=input.files[0];if(!f)return;const form=new FormData();form.append('file',f);showStatus('Importing config...','info');try{const r=await fetch('/import',{method:'POST',body:form});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Import failed');showStatus(d.message,'ok');setTimeout(()=>location.reload(),900);}catch(err){showStatus(err.message,'err');}finally{input.value='';}}
-</script></body></html>"""
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X 自動投稿</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+      background: linear-gradient(180deg, #f7f3ec 0%, #efe7db 100%);
+      color: #1f2a33;
+      min-height: 100vh;
+    }
+    .shell {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 28px 18px 40px;
+    }
+    .card {
+      background: rgba(255, 252, 247, 0.96);
+      border: 1px solid #dccdb7;
+      border-radius: 22px;
+      box-shadow: 0 20px 40px rgba(109, 87, 55, 0.12);
+      padding: 20px;
+    }
+    .card + .card { margin-top: 16px; }
+    .top {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 30px; }
+    h2 { font-size: 18px; }
+    .subtext {
+      margin-top: 10px;
+      color: #5f6f7d;
+      line-height: 1.7;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: #ddebf8;
+      color: #22598a;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .metric {
+      background: #f8f2e8;
+      border: 1px solid #e2d2bb;
+      border-radius: 16px;
+      padding: 14px;
+    }
+    .label {
+      font-size: 12px;
+      color: #7b6f61;
+    }
+    .value {
+      margin-top: 6px;
+      font-weight: 700;
+      font-size: 18px;
+      word-break: break-word;
+    }
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      background: #fffdf9;
+      border: 1px solid #d9c6a8;
+      border-radius: 18px;
+      padding: 16px;
+      font-size: 15px;
+      line-height: 1.7;
+      color: #1f2a33;
+    }
+    textarea:focus {
+      outline: 2px solid #85b3dd;
+      border-color: #85b3dd;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .row.space {
+      justify-content: space-between;
+    }
+    .meta-line {
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      color: #7b6f61;
+      font-size: 13px;
+    }
+    .status {
+      display: none;
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      line-height: 1.6;
+    }
+    .status.ok {
+      display: block;
+      background: #e3f6e7;
+      border: 1px solid #9fd0a8;
+      color: #24643a;
+    }
+    .status.err {
+      display: block;
+      background: #fbe6e7;
+      border: 1px solid #e3a2a7;
+      color: #8a2f3b;
+    }
+    .status.info {
+      display: block;
+      background: #e7f0fa;
+      border: 1px solid #a9c6e6;
+      color: #285982;
+    }
+    .media-box {
+      margin-top: 16px;
+      padding: 16px;
+      background: #fbf7f0;
+      border: 1px solid #e2d2bb;
+      border-radius: 18px;
+    }
+    .preview {
+      margin-top: 12px;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid #e0cfb4;
+      background: #fff;
+    }
+    .preview img,
+    .preview video {
+      width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      display: block;
+      background: #fff;
+    }
+    .btn {
+      border: none;
+      border-radius: 14px;
+      padding: 12px 16px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform .12s ease, opacity .12s ease;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+    .btn-primary { background: #2f6ea8; color: #fff; }
+    .btn-secondary { background: #d7e5f2; color: #244c72; }
+    .btn-soft { background: #efe2cf; color: #6b4d27; }
+    .hint {
+      margin-top: 14px;
+      padding: 14px;
+      background: #fff7ea;
+      border: 1px solid #edd7af;
+      border-radius: 16px;
+      color: #715a2f;
+      line-height: 1.7;
+    }
+    .log-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .log-item {
+      background: #faf5ed;
+      border: 1px solid #e1d3c0;
+      border-radius: 16px;
+      padding: 14px;
+    }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .pill.ok {
+      background: #e3f6e7;
+      color: #24643a;
+    }
+    .pill.ng {
+      background: #fbe6e7;
+      color: #8a2f3b;
+    }
+    .muted {
+      color: #7b6f61;
+      font-size: 13px;
+    }
+    @media (max-width: 640px) {
+      .row,
+      .row.space {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .btn {
+        width: 100%;
+      }
+      h1 {
+        font-size: 25px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="card">
+      <div class="top">
+        <h1>X 自動投稿</h1>
+        <span class="badge">v{{ version }}</span>
+        <span class="badge">{{ storage_mode }}</span>
+        <span class="badge">{{ "既存Chrome利用可" if existing_profile_available else "既存Chrome利用不可" }}</span>
+      </div>
+      <p class="subtext">
+        ユーザー名やパスワードは使わず、既存の Chrome プロフィールで X を開いてそのまま投稿します。
+        画像と動画も添付できます。
+      </p>
+      <div class="summary">
+        <div class="metric">
+          <div class="label">現在のメディア</div>
+          <div class="value" id="media-name">{{ state.media_filename or "未選択" }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">最後の投稿</div>
+          <div class="value">{{ state.last_post_at or "まだありません" }}</div>
+        </div>
+        <div class="metric">
+          <div class="label">使用プロフィール</div>
+          <div class="value">{{ chrome_profile }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>投稿内容</h2>
+      <p class="subtext">本文を書いて、必要なら画像か動画を添付して、そのまま投稿します。</p>
+      <textarea id="content" placeholder="ここに投稿文を書いてください。">{{ state.content }}</textarea>
+      <div class="meta-line">
+        <div id="autosave">下書きは自動保存されます。</div>
+        <div><span id="char-count">0</span> 文字</div>
+      </div>
+
+      <div class="media-box">
+        <div class="row space">
+          <div>
+            <div class="label">画像・動画</div>
+            <div class="value" style="font-size:16px;" id="media-label">{{ state.media_filename or "なし" }}</div>
+          </div>
+          <div class="row">
+            <label class="btn btn-soft">
+              画像・動画を選ぶ
+              <input id="media-input" type="file" accept="image/*,video/*" style="display:none" onchange="uploadMedia(this)">
+            </label>
+            <button class="btn btn-secondary" onclick="clearMedia()">メディアを外す</button>
+          </div>
+        </div>
+        <div id="preview-area">
+          {% if state.has_media %}
+            <div class="preview">
+              {% if state.is_video %}
+                <video src="/media" controls></video>
+              {% else %}
+                <img src="/media" alt="preview">
+              {% endif %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:16px;">
+        <button class="btn btn-secondary" id="open-x-btn" onclick="openX(event)" {% if not existing_profile_available %}disabled{% endif %}>既存Chromeで投稿画面を開く</button>
+        <button class="btn btn-primary" id="post-btn" onclick="postNow(event)" {% if not existing_profile_available %}disabled{% endif %}>既存Chromeで投稿する</button>
+      </div>
+
+      <div class="hint">
+        この操作では Chrome を再起動することがあります。Web アプリ自体は Edge など別ブラウザで開いておくと安定します。
+      </div>
+
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>最近のログ</h2>
+      <div class="log-list">
+        {% if logs %}
+          {% for log in logs %}
+            <div class="log-item">
+              <div class="row space">
+                <strong>{{ log.time }}</strong>
+                <span class="pill {{ 'ok' if log.success else 'ng' }}">{{ '成功' if log.success else '失敗' }}</span>
+              </div>
+              <div class="muted" style="margin-top:8px;">本文</div>
+              <div style="white-space:pre-wrap; margin-top:4px;">{{ log.content or 'なし' }}</div>
+              <div class="muted" style="margin-top:8px;">メディア</div>
+              <div style="margin-top:4px;">{{ log.media_filename or 'なし' }}</div>
+              <div class="muted" style="margin-top:8px;">結果</div>
+              <div style="white-space:pre-wrap; margin-top:4px;">{{ log.message }}</div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="log-item muted">まだログはありません。</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const contentEl = document.getElementById('content');
+    const autosaveEl = document.getElementById('autosave');
+    const charCountEl = document.getElementById('char-count');
+    const mediaLabelEl = document.getElementById('media-label');
+    const mediaNameEl = document.getElementById('media-name');
+    const previewAreaEl = document.getElementById('preview-area');
+    let saveTimer = null;
+
+    function updateCharCount() {
+      charCountEl.textContent = contentEl.value.length;
+    }
+
+    function showStatus(message, type) {
+      const el = document.getElementById('status');
+      el.textContent = message;
+      el.className = 'status ' + type;
+    }
+
+    async function saveDraft(showSaved = false) {
+      const response = await fetch('/draft', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({content: contentEl.value})
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || '下書きの保存に失敗しました。');
+      }
+      autosaveEl.textContent = showSaved ? '下書きを保存しました。' : '下書きは自動保存されます。';
+      return data;
+    }
+
+    function queueDraftSave() {
+      autosaveEl.textContent = '下書きを保存中...';
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(async () => {
+        try {
+          await saveDraft(false);
+        } catch (error) {
+          autosaveEl.textContent = error.message;
+        }
+      }, 500);
+    }
+
+    function renderPreview(url, isVideo) {
+      previewAreaEl.innerHTML = '';
+      if (!url) return;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'preview';
+      if (isVideo) {
+        const video = document.createElement('video');
+        video.src = url;
+        video.controls = true;
+        wrapper.appendChild(video);
+      } else {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = 'preview';
+        wrapper.appendChild(img);
+      }
+      previewAreaEl.appendChild(wrapper);
+    }
+
+    async function uploadMedia(input) {
+      const file = input.files[0];
+      if (!file) return;
+      showStatus('メディアをアップロードしています...', 'info');
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const response = await fetch('/upload', { method: 'POST', body: form });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || 'メディアのアップロードに失敗しました。');
+        }
+        mediaLabelEl.textContent = data.filename;
+        mediaNameEl.textContent = data.filename;
+        renderPreview(URL.createObjectURL(file), file.type.startsWith('video/'));
+        showStatus(data.message, 'ok');
+      } catch (error) {
+        showStatus(error.message, 'err');
+      } finally {
+        input.value = '';
+      }
+    }
+
+    async function clearMedia() {
+      try {
+        const response = await fetch('/media/clear', { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || 'メディアの削除に失敗しました。');
+        }
+        mediaLabelEl.textContent = 'なし';
+        mediaNameEl.textContent = '未選択';
+        renderPreview('', false);
+        showStatus(data.message, 'ok');
+      } catch (error) {
+        showStatus(error.message, 'err');
+      }
+    }
+
+    async function withButton(button, action) {
+      button.disabled = true;
+      try {
+        await action();
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function openX(event) {
+      await withButton(event.currentTarget, async () => {
+        showStatus('既存Chromeで投稿画面を開いています...', 'info');
+        await saveDraft(false);
+        const response = await fetch('/open-x', { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || '投稿画面を開けませんでした。');
+        }
+        showStatus(data.message, 'ok');
+      });
+    }
+
+    async function postNow(event) {
+      if (!confirm('既存Chromeでそのまま投稿します。続けますか。')) return;
+      await withButton(event.currentTarget, async () => {
+        showStatus('既存Chromeで投稿しています。Chrome が再起動することがあります...', 'info');
+        await saveDraft(false);
+        const response = await fetch('/post', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({content: contentEl.value})
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || '投稿に失敗しました。');
+        }
+        showStatus(data.message, 'ok');
+        setTimeout(() => location.reload(), 1200);
+      });
+    }
+
+    contentEl.addEventListener('input', () => {
+      updateCharCount();
+      queueDraftSave();
+    });
+    updateCharCount();
+  </script>
+</body>
+</html>
+"""
 
 
 @app.route("/")
 def index():
-    config = get_config()
-    logs = get_logs()
-    enabled_count = sum(1 for account in config["accounts"] if account.get("enabled"))
-    return render_template_string(HTML, config=config, enabled_count=enabled_count, logs=logs, version=VERSION, project=PROJECT_ID, storage_mode=storage_mode_label(), service_url=SERVICE_URL, gcs_bucket=GCS_BUCKET, existing_profile_available=existing_profile_available())
+    return render_template_string(
+        HTML,
+        state=get_state(),
+        logs=get_logs(),
+        version=VERSION,
+        storage_mode=storage_mode_label(),
+        existing_profile_available=existing_profile_available(),
+        chrome_profile=DEFAULT_CHROME_PROFILE,
+    )
 
 
-@app.route("/settings/<int:idx>", methods=["POST"])
-def update_settings(idx: int):
-    data = request.get_json() or {}
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    account = config["accounts"][idx]
-    account["label"] = (data.get("label") or account["label"]).strip() or account["label"]
-    account["username"] = (data.get("username") or account["username"]).strip()
-    if data.get("password"):
-        account["password"] = data["password"]
-    account["content"] = (data.get("content") or "").strip()
-    account["hour"] = max(0, min(23, int(data.get("hour", account["hour"]))))
-    account["minute"] = max(0, min(59, int(data.get("minute", account["minute"]))))
-    account["enabled"] = bool(data.get("enabled", account["enabled"]))
-    account["discord_webhook"] = (data.get("discord_webhook") or "").strip()
-    account["next_run"] = next_run_text(account["hour"], account["minute"], account["enabled"])
-    scheduler_note = None
-    if idx == 0:
-        _, scheduler_note = update_scheduler(account["hour"], account["minute"], config["timezone"], account["enabled"])
-    save_config(config)
-    message = f"設定を保存しました。次回実行は {account['next_run']} です。"
-    if scheduler_note:
-        message += f" {scheduler_note}"
-    return jsonify({"ok": True, "message": message})
+@app.route("/draft", methods=["POST"])
+def save_draft():
+    payload = request.get_json() or {}
+    state = get_state()
+    state["content"] = (payload.get("content") or "").strip()
+    save_state(state)
+    return jsonify({"ok": True, "message": "下書きを保存しました。"})
 
 
-@app.route("/accounts/add", methods=["POST"])
-def add_account():
-    config = get_config()
-    next_index = len(config["accounts"]) + 1
-    config["accounts"].append(normalize_account({**DEFAULT_ACCOUNT, "id": f"acct{next_index}", "label": f"アカウント {next_index}"}, next_index - 1))
-    save_config(config)
-    return jsonify({"ok": True})
-
-
-@app.route("/accounts/duplicate/<int:idx>", methods=["POST"])
-def duplicate_account(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    base = {key: config["accounts"][idx].get(key, DEFAULT_ACCOUNT.get(key)) for key in DEFAULT_ACCOUNT}
-    base["id"] = f"acct{len(config['accounts']) + 1}"
-    base["label"] = f"{base['label']} コピー"
-    base["last_post_date"] = ""
-    config["accounts"].append(normalize_account(base, len(config["accounts"])))
-    save_config(config)
-    return jsonify({"ok": True})
-
-
-@app.route("/accounts/<int:idx>", methods=["DELETE"])
-def delete_account(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]) or len(config["accounts"]) <= 1:
-        return jsonify({"ok": False, "error": "このアカウントは削除できません。"}), 400
-    account = config["accounts"].pop(idx)
-    delete_media_file(account.get("media_path", ""))
-    clear_cookie_store(idx)
-    save_config(config)
-    return jsonify({"ok": True})
-
-
-@app.route("/post", methods=["POST"])
-@app.route("/post/<int:idx>", methods=["POST"])
-def do_post(idx: int = 0):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    account = config["accounts"][idx]
-    manual = request.args.get("manual") == "1"
-    today = now_jst().strftime("%Y-%m-%d")
-    if not account.get("enabled", True) and not manual:
-        return jsonify({"ok": True, "message": "このアカウントの投稿は停止中です。"})
-    if not manual and account.get("last_post_date") == today:
-        return jsonify({"ok": True, "message": "今日はすでに投稿済みのためスキップしました。"})
-    username = account.get("username") or os.environ.get("X_USERNAME", "")
-    password = account.get("password") or os.environ.get("X_PASSWORD", "")
-    if not username or not password:
-        return jsonify({"ok": False, "error": "ユーザー名またはパスワードが未設定です。"}), 400
-    content = (account.get("content") or "").strip()
-    if not content:
-        return jsonify({"ok": False, "error": "投稿内容が空です。"}), 400
-    media_path = None
-    stored_media_path = account.get("media_path", "")
-    if stored_media_path:
-        try:
-            media_path = fetch_media_to_runtime(idx, stored_media_path)
-        except Exception as exc:
-            print(f"メディア読み込み失敗: {exc}")
-    cookies = data_read(f"cookies_{idx}.json") or []
-    success, message, new_cookies = poster.post_tweet(username, password, content, cookies, media_path)
-    if new_cookies:
-        data_write(f"cookies_{idx}.json", new_cookies)
-    add_log(success, message, content, account.get("label", ""))
-    if success:
-        account["last_post_date"] = today
-        save_config(config)
-    try:
-        send_discord(account.get("discord_webhook", ""), success, content, message)
-    except Exception as exc:
-        add_log(False, f"Webhook エラー: {exc}", content, account.get("label", ""))
-    if success:
-        return jsonify({"ok": True, "message": message})
-    return jsonify({"ok": False, "error": message}), 500
-
-
-@app.route("/post-existing/<int:idx>", methods=["POST"])
-def do_post_existing(idx: int):
-    if not existing_profile_available():
-        return jsonify({"ok": False, "error": "既存Chrome投稿はローカルの Windows 環境でのみ使えます。"}), 400
-
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-
-    account = config["accounts"][idx]
-    content = (account.get("content") or "").strip()
-    stored_media_path = account.get("media_path", "")
-    media_path = stored_media_path if stored_media_path and Path(stored_media_path).exists() else None
-    if not content and not media_path:
-        return jsonify({"ok": False, "error": "投稿本文かメディアを用意してください。"}), 400
-
-    success, message = run_existing_profile_post(account, content, media_path)
-    add_log(success, message, content or account.get("media_filename", ""), account.get("label", ""))
-    if success:
-        account["last_post_date"] = now_jst().strftime("%Y-%m-%d")
-        save_config(config)
-    try:
-        send_discord(account.get("discord_webhook", ""), success, content or account.get("media_filename", ""), message)
-    except Exception as exc:
-        add_log(False, f"Webhook エラー: {exc}", content or account.get("media_filename", ""), account.get("label", ""))
-
-    if success:
-        return jsonify({"ok": True, "message": message})
-    return jsonify({"ok": False, "error": message}), 500
-
-
-@app.route("/upload/<int:idx>", methods=["POST"])
-def upload_media(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
+@app.route("/upload", methods=["POST"])
+def upload_media():
     if "file" not in request.files:
         return jsonify({"ok": False, "error": "ファイルがありません。"}), 400
     upload = request.files["file"]
     if not upload.filename:
         return jsonify({"ok": False, "error": "ファイル名が空です。"}), 400
-    current_path = config["accounts"][idx].get("media_path", "")
-    if current_path:
-        delete_media_file(current_path)
-    stored_path, filename = save_uploaded_media(idx, upload)
-    config["accounts"][idx]["media_path"] = stored_path
-    config["accounts"][idx]["media_filename"] = filename
-    save_config(config)
-    return jsonify({"ok": True, "message": f"メディアを保存しました: {filename}"})
+    state = get_state()
+    if state.get("media_path"):
+        delete_media_file(state["media_path"])
+    media_path, media_filename = save_uploaded_media(upload)
+    state["media_path"] = media_path
+    state["media_filename"] = media_filename
+    save_state(state)
+    return jsonify(
+        {
+            "ok": True,
+            "filename": media_filename,
+            "message": f"メディアを保存しました: {media_filename}",
+        }
+    )
 
 
-@app.route("/media/<int:idx>")
-def serve_media(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return "", 404
-    data, content_type = load_media_bytes(config["accounts"][idx].get("media_path", ""))
+@app.route("/media")
+def serve_media():
+    state = get_state()
+    data, content_type = load_media_bytes(state.get("media_path", ""))
     if data is None:
         return "", 404
     return Response(data, content_type=content_type)
 
 
-@app.route("/media/clear/<int:idx>", methods=["POST"])
-def clear_media(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    delete_media_file(config["accounts"][idx].get("media_path", ""))
-    config["accounts"][idx]["media_path"] = ""
-    config["accounts"][idx]["media_filename"] = ""
-    save_config(config)
-    return jsonify({"ok": True})
+@app.route("/media/clear", methods=["POST"])
+def clear_media():
+    state = get_state()
+    if state.get("media_path"):
+        delete_media_file(state["media_path"])
+    state["media_path"] = ""
+    state["media_filename"] = ""
+    save_state(state)
+    return jsonify({"ok": True, "message": "メディアを外しました。"})
 
 
-@app.route("/cookies/clear/<int:idx>", methods=["POST"])
-def clear_cookies(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    clear_cookie_store(idx)
-    return jsonify({"ok": True, "message": "保存済み Cookie を削除しました。"})
+@app.route("/open-x", methods=["POST"])
+def open_x():
+    if not existing_profile_available():
+        return jsonify({"ok": False, "error": "既存Chrome投稿はローカルの Windows 環境でのみ使えます。"}), 400
+    state = get_state()
+    extra_args = ["--open-only"]
+    if state.get("profile_handle"):
+        extra_args.extend(["--profile-handle", state["profile_handle"]])
+    success, message = run_existing_profile_command(extra_args)
+    add_log(success, f"投稿画面を開く: {message}", state.get("content", ""), state.get("media_filename", ""))
+    if success:
+        return jsonify({"ok": True, "message": message})
+    return jsonify({"ok": False, "error": message}), 500
 
 
-@app.route("/webhook/test/<int:idx>", methods=["POST"])
-def test_webhook(idx: int):
-    config = get_config()
-    if idx >= len(config["accounts"]):
-        return jsonify({"ok": False, "error": "アカウントが見つかりません。"}), 404
-    webhook_url = config["accounts"][idx].get("discord_webhook", "")
-    if not webhook_url:
-        return jsonify({"ok": False, "error": "Discord Webhook が未設定です。"}), 400
-    try:
-        send_discord(webhook_url, True, "Webhook テスト", "X 自動投稿ツールからのテスト通知です。")
-        return jsonify({"ok": True, "message": "Webhook テストを送信しました。"})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 500
+@app.route("/post", methods=["POST"])
+def post_now():
+    if not existing_profile_available():
+        return jsonify({"ok": False, "error": "既存Chrome投稿はローカルの Windows 環境でのみ使えます。"}), 400
 
+    payload = request.get_json() or {}
+    state = get_state()
+    content = (payload.get("content") or state.get("content") or "").strip()
+    media_path = state.get("media_path") or ""
+    if LOCAL_MODE and media_path and not Path(media_path).exists():
+        media_path = ""
 
-@app.route("/export")
-def export_config():
-    payload = json.dumps(exported_config(), ensure_ascii=False, indent=2)
-    return Response(payload, content_type="application/json", headers={"Content-Disposition": 'attachment; filename="x-auto-poster-config.json"'})
+    if not content and not media_path:
+        return jsonify({"ok": False, "error": "投稿文か画像・動画のどちらかを入れてください。"}), 400
 
+    state["content"] = content
+    save_state(state)
 
-@app.route("/import", methods=["POST"])
-def import_config():
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "ファイルがありません。"}), 400
-    upload = request.files["file"]
-    if not upload.filename:
-        return jsonify({"ok": False, "error": "ファイル名が空です。"}), 400
-    try:
-        payload = json.loads(upload.stream.read().decode("utf-8"))
-    except Exception:
-        return jsonify({"ok": False, "error": "JSON ファイルが不正です。"}), 400
-    config = payload.get("config", payload)
-    accounts = config.get("accounts")
-    if not isinstance(accounts, list) or not accounts:
-        return jsonify({"ok": False, "error": "設定には最低1つのアカウントが必要です。"}), 400
-    normalized = {"timezone": config.get("timezone", "Asia/Tokyo"), "accounts": []}
-    for idx, account in enumerate(accounts):
-        normalized["accounts"].append(normalize_account(account, idx))
-    save_config(normalized)
-    return jsonify({"ok": True, "message": "設定を読み込みました。"})
+    extra_args: list[str] = []
+    if content:
+        extra_args.extend(["--text", content])
+    if media_path:
+        extra_args.extend(["--media-path", media_path])
+    if state.get("profile_handle"):
+        extra_args.extend(["--profile-handle", state["profile_handle"]])
+
+    success, message = run_existing_profile_command(extra_args)
+    add_log(success, message, content, state.get("media_filename", ""))
+    if success:
+        state["last_post_at"] = now_jst().strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+        return jsonify({"ok": True, "message": message})
+    return jsonify({"ok": False, "error": message}), 500
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "version": VERSION, "storage_mode": storage_mode_label(), "project": PROJECT_ID})
+    return jsonify(
+        {
+            "status": "ok",
+            "version": VERSION,
+            "storage_mode": storage_mode_label(),
+            "project": PROJECT_ID,
+            "existing_profile_available": existing_profile_available(),
+        }
+    )
 
 
 if __name__ == "__main__":

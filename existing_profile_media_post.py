@@ -1,39 +1,35 @@
-"""Post to X by reusing the local Chrome profile via UI automation."""
+"""Post to X by reusing the local Chrome profile via Selenium."""
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import subprocess
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 import pyperclip
-from PIL import ImageGrab
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver import ActionChains
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DEBUG_DIR = DATA_DIR / "debug"
 SYSTEM_USER_DATA_DIR = Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
-CHROME_PATH = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
-
-user32 = ctypes.windll.user32
-
-VK_SHIFT = 0x10
-VK_CONTROL = 0x11
-VK_TAB = 0x09
-VK_SPACE = 0x20
-VK_L = 0x4C
-VK_RETURN = 0x0D
-
-WM_PASTE = 0x0302
-EM_SETSEL = 0x00B1
-BM_CLICK = 0x00F5
-
-EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+COMPOSE_URL = "https://x.com/compose/post"
+REMOTE_DEBUGGING_PORT = 9222
+CHROME_CANDIDATES = [
+    Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,115 +37,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--media-path", help="image or video path")
     parser.add_argument("--text", default="", help="optional post text")
     parser.add_argument("--profile-directory", default="Default", help="Chrome profile directory")
-    parser.add_argument("--profile-handle", default="meetyoursxey", help="X handle used for verification")
+    parser.add_argument("--profile-handle", default="", help="X handle used for verification")
     parser.add_argument("--wait-seconds", type=int, default=20, help="wait time after selecting media")
+    parser.add_argument("--open-only", action="store_true", help="only open the compose page")
+    parser.add_argument("--draft-only", action="store_true", help="fill the compose box but do not post")
     return parser.parse_args()
 
 
-def key(vk: int, up: bool = False) -> None:
-    user32.keybd_event(vk, 0, 2 if up else 0, 0)
+def resolve_chrome_path() -> Path:
+    for path in CHROME_CANDIDATES:
+        if path.exists():
+            return path
+    raise RuntimeError("Google Chrome が見つかりませんでした。")
 
 
-def tap(vk: int, delay: float = 0.05) -> None:
-    key(vk)
-    time.sleep(delay)
-    key(vk, True)
-    time.sleep(delay)
-
-
-def chord(mod: int, vk: int) -> None:
-    key(mod)
-    time.sleep(0.05)
-    key(vk)
-    time.sleep(0.05)
-    key(vk, True)
-    key(mod, True)
-    time.sleep(0.15)
-
-
-def type_text(text: str) -> None:
-    for ch in text:
-        code = user32.VkKeyScanW(ord(ch))
-        if code == -1:
-            continue
-        vk = code & 0xFF
-        shift_state = (code >> 8) & 0xFF
-        if shift_state & 1:
-            key(VK_SHIFT)
-            time.sleep(0.01)
-        key(vk)
-        time.sleep(0.02)
-        key(vk, True)
-        if shift_state & 1:
-            key(VK_SHIFT, True)
-        time.sleep(0.03)
-
-
-def get_window_text(hwnd: int) -> str:
-    length = user32.GetWindowTextLengthW(hwnd)
-    buffer = ctypes.create_unicode_buffer(length + 1)
-    user32.GetWindowTextW(hwnd, buffer, length + 1)
-    return buffer.value
-
-
-def get_class_name(hwnd: int) -> str:
-    buffer = ctypes.create_unicode_buffer(256)
-    user32.GetClassNameW(hwnd, buffer, 256)
-    return buffer.value
-
-
-def get_window_pid(hwnd: int) -> int:
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    return pid.value
-
-
-def screenshot(name: str) -> Path:
+def screenshot(driver: webdriver.Chrome, name: str) -> Path:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     path = DEBUG_DIR / name
-    ImageGrab.grab().save(path)
+    driver.save_screenshot(str(path))
     return path
 
 
-def enumerate_windows(include_untitled: bool = False) -> list[int]:
-    windows: list[int] = []
-
-    def callback(hwnd: int, _lparam: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        title = get_window_text(hwnd)
-        if include_untitled or title:
-            windows.append(hwnd)
-        return True
-
-    user32.EnumWindows(EnumWindowsProc(callback), 0)
-    return windows
-
-
-def find_x_window(chrome_pid: int, timeout_seconds: float = 30.0) -> int:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        for hwnd in enumerate_windows(include_untitled=True):
-            class_name = get_class_name(hwnd)
-            title = get_window_text(hwnd)
-            if get_window_pid(hwnd) == chrome_pid and class_name == "Chrome_WidgetWin_1" and title != "Default IME":
-                return hwnd
-        for hwnd in enumerate_windows(include_untitled=True):
-            class_name = get_class_name(hwnd)
-            title = get_window_text(hwnd)
-            if class_name == "Chrome_WidgetWin_1" and "Google Chrome" in title and ("x.com" in title or " / X" in title):
-                return hwnd
-        time.sleep(0.5)
-    raise RuntimeError("Chrome の起動後に操作対象ウィンドウを見つけられませんでした。")
-
-
-def focus_window(hwnd: int) -> None:
-    user32.ShowWindow(hwnd, 9)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.8)
-
-
-def relaunch_clean_chrome(profile_directory: str) -> int:
+def relaunch_clean_chrome(profile_directory: str, target_url: str = COMPOSE_URL) -> None:
     subprocess.run(
         ["taskkill", "/IM", "chrome.exe", "/F"],
         check=False,
@@ -157,145 +66,229 @@ def relaunch_clean_chrome(profile_directory: str) -> int:
         text=True,
     )
     time.sleep(1.0)
-    proc = subprocess.Popen(
+    subprocess.Popen(
         [
-            str(CHROME_PATH),
+            str(resolve_chrome_path()),
             f"--user-data-dir={SYSTEM_USER_DATA_DIR}",
             f"--profile-directory={profile_directory}",
+            f"--remote-debugging-port={REMOTE_DEBUGGING_PORT}",
             "--disable-extensions",
             "--hide-crash-restore-bubble",
             "--disable-session-crashed-bubble",
-            "https://x.com/home",
+            target_url,
         ]
     )
     time.sleep(4.0)
-    return proc.pid
 
 
-def open_compose(hwnd: int, text: str) -> None:
-    focus_window(hwnd)
-    tap(ord("N"), 0.04)
-    time.sleep(1.8)
-    if text:
+def connect_driver() -> webdriver.Chrome:
+    options = Options()
+    options.add_experimental_option("debuggerAddress", f"127.0.0.1:{REMOTE_DEBUGGING_PORT}")
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
+
+
+def wait_for_any(driver: webdriver.Chrome, locators: list[tuple[str, str]], timeout: float = 20):
+    deadline = time.time() + timeout
+    last_error = None
+    while time.time() < deadline:
+        for by, selector in locators:
+            try:
+                return driver.find_element(by, selector)
+            except Exception as exc:
+                last_error = exc
+        time.sleep(0.4)
+    raise TimeoutException(str(last_error) if last_error else "element not found")
+
+
+def wait_for_compose_ready(driver: webdriver.Chrome) -> None:
+    driver.get(COMPOSE_URL)
+    wait_for_any(
+        driver,
+        [
+            (By.CSS_SELECTOR, 'div[data-testid="tweetTextarea_0"]'),
+            (By.CSS_SELECTOR, 'div[role="textbox"][contenteditable="true"]'),
+        ],
+        timeout=25,
+    )
+
+
+def find_compose_box(driver: webdriver.Chrome):
+    return wait_for_any(
+        driver,
+        [
+            (By.CSS_SELECTOR, 'div[data-testid="tweetTextarea_0"]'),
+            (By.CSS_SELECTOR, 'div[role="textbox"][contenteditable="true"]'),
+        ],
+        timeout=15,
+    )
+
+
+def read_compose_text(driver: webdriver.Chrome) -> str:
+    return driver.execute_script(
+        """
+        const box = document.querySelector('div[data-testid="tweetTextarea_0"], div[role="textbox"][contenteditable="true"]');
+        return box ? (box.innerText || box.textContent || '').trim() : '';
+        """
+    )
+
+
+def focus_compose_box(driver: webdriver.Chrome) -> None:
+    box = find_compose_box(driver)
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", box)
+    ActionChains(driver).move_to_element(box).click(box).perform()
+    time.sleep(0.8)
+
+
+def set_compose_text(driver: webdriver.Chrome, text: str) -> None:
+    if not text:
+        return
+    focus_compose_box(driver)
+    box = find_compose_box(driver)
+    box.send_keys(Keys.CONTROL, "a")
+    box.send_keys(Keys.BACKSPACE)
+    time.sleep(0.2)
+    try:
+        driver.execute_cdp_cmd("Input.insertText", {"text": text})
+    except Exception:
         pyperclip.copy(text)
-        chord(VK_CONTROL, 0x56)
-        time.sleep(0.5)
+        box.send_keys(Keys.CONTROL, "v")
+    time.sleep(1.0)
+
+    actual = read_compose_text(driver)
+    if text not in actual:
+        focus_compose_box(driver)
+        pyperclip.copy(text)
+        box = find_compose_box(driver)
+        box.send_keys(Keys.CONTROL, "a")
+        box.send_keys(Keys.BACKSPACE)
+        time.sleep(0.2)
+        box.send_keys(Keys.CONTROL, "v")
+        time.sleep(1.0)
+        actual = read_compose_text(driver)
+    if text not in actual:
+        raise RuntimeError("投稿文を入力できませんでした。")
 
 
-def open_media_dialog() -> int:
-    for _ in range(2):
-        tap(VK_TAB, 0.06)
-    tap(VK_SPACE, 0.08)
-    time.sleep(1.4)
-    for hwnd in enumerate_windows():
-        if get_class_name(hwnd) == "#32770":
-            return hwnd
-    raise RuntimeError("ファイル選択ダイアログが開きませんでした。")
-
-
-def find_dialog_controls(dialog_hwnd: int) -> tuple[int, int]:
-    children: list[int] = []
-
-    def callback(hwnd: int, _lparam: int) -> bool:
-        children.append(hwnd)
-        return True
-
-    user32.EnumChildWindows(dialog_hwnd, EnumChildProc(callback), 0)
-
-    edit_hwnd = 0
-    button_hwnd = 0
-    for hwnd in children:
-        class_name = get_class_name(hwnd)
-        title = get_window_text(hwnd)
-        if class_name == "Edit" and not edit_hwnd:
-            edit_hwnd = hwnd
-        if class_name == "Button" and ("開く" in title or "(&O)" in title or "ŠJ" in title):
-            button_hwnd = hwnd
-
-    if not edit_hwnd or not button_hwnd:
-        raise RuntimeError("ファイル選択ダイアログの入力欄を見つけられませんでした。")
-    return edit_hwnd, button_hwnd
-
-
-def attach_media(media_path: Path, wait_seconds: int) -> None:
-    dialog_hwnd = open_media_dialog()
-    edit_hwnd, button_hwnd = find_dialog_controls(dialog_hwnd)
-    pyperclip.copy(str(media_path.resolve()))
-    user32.SendMessageW(edit_hwnd, EM_SETSEL, 0, -1)
-    user32.SendMessageW(edit_hwnd, WM_PASTE, 0, 0)
-    time.sleep(0.4)
-    user32.SendMessageW(button_hwnd, BM_CLICK, 0, 0)
+def attach_media(driver: webdriver.Chrome, media_path: Path, wait_seconds: int) -> None:
+    file_input = wait_for_any(
+        driver,
+        [
+            (By.CSS_SELECTOR, 'input[data-testid="fileInput"]'),
+            (By.CSS_SELECTOR, 'input[type="file"]'),
+        ],
+        timeout=15,
+    )
+    driver.execute_script(
+        "arguments[0].style.display='block'; arguments[0].style.visibility='visible';",
+        file_input,
+    )
+    file_input.send_keys(str(media_path.resolve()))
     time.sleep(wait_seconds)
 
 
-def click_post_via_javascript(hwnd: int) -> None:
-    focus_window(hwnd)
-    chord(VK_CONTROL, VK_L)
-    type_text("javascript:")
-    pyperclip.copy("document.querySelector('[data-testid=tweetButton]')?.click()")
-    chord(VK_CONTROL, 0x56)
-    tap(VK_RETURN)
-    time.sleep(8.0)
+def find_post_button(driver: webdriver.Chrome):
+    return wait_for_any(
+        driver,
+        [
+            (By.CSS_SELECTOR, '[data-testid="tweetButton"]'),
+            (By.CSS_SELECTOR, '[data-testid="tweetButtonInline"]'),
+        ],
+        timeout=15,
+    )
 
 
-def verify_media_tab(hwnd: int, profile_handle: str) -> None:
-    focus_window(hwnd)
-    chord(VK_CONTROL, VK_L)
-    pyperclip.copy(f"https://x.com/{profile_handle}/media")
-    chord(VK_CONTROL, 0x56)
-    tap(VK_RETURN)
-    time.sleep(8.0)
-
-
-def verify_profile(hwnd: int, profile_handle: str) -> None:
-    focus_window(hwnd)
-    chord(VK_CONTROL, VK_L)
-    pyperclip.copy(f"https://x.com/{profile_handle}")
-    chord(VK_CONTROL, 0x56)
-    tap(VK_RETURN)
-    time.sleep(8.0)
-
-
-def main() -> int:
+def click_post(driver: webdriver.Chrome, expected_text: str) -> None:
+    button = find_post_button(driver)
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", button)
     try:
-        user32.SetProcessDPIAware()
+        WebDriverWait(driver, 15).until(lambda d: button.get_attribute("aria-disabled") != "true")
     except Exception:
         pass
 
+    try:
+        button.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", button)
+    time.sleep(3.0)
+
+    remaining = read_compose_text(driver)
+    if expected_text and expected_text in remaining:
+        focus_compose_box(driver)
+        ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
+        time.sleep(5.0)
+
+
+def verify_profile(driver: webdriver.Chrome, profile_handle: str, has_media: bool) -> None:
+    if not profile_handle:
+        return
+    suffix = "media" if has_media else ""
+    target = f"https://x.com/{profile_handle}/{suffix}".rstrip("/")
+    driver.get(target)
+    time.sleep(6.0)
+
+
+def cleanup_driver(driver: webdriver.Chrome | None) -> None:
+    if driver is None:
+        return
+    try:
+        driver.service.stop()
+    except Exception:
+        pass
+
+
+def main() -> int:
     args = parse_args()
     text = args.text.strip()
     media_path = Path(args.media_path) if args.media_path else None
+    profile_handle = args.profile_handle.strip().lstrip("@")
+    driver: webdriver.Chrome | None = None
+
     if media_path is not None and not media_path.exists():
         print(f'{{"success": false, "message": "メディアファイルが見つかりません: {media_path}"}}')
         return 1
-    if media_path is None and not text:
-        print('{"success": false, "message": "投稿本文またはメディアを指定してください。"}')
+    if not args.open_only and media_path is None and not text:
+        print('{"success": false, "message": "投稿文かメディアを指定してください。"}')
         return 1
 
     try:
-        chrome_pid = relaunch_clean_chrome(args.profile_directory)
-        x_hwnd = find_x_window(chrome_pid)
-        open_compose(x_hwnd, text)
+        relaunch_clean_chrome(args.profile_directory, COMPOSE_URL)
+        driver = connect_driver()
+        wait_for_compose_ready(driver)
+
+        if args.open_only:
+            screenshot(driver, "existing_profile_open_only.png")
+            print('{"success": true, "message": "既存Chromeプロフィールで投稿画面を開きました。"}')
+            return 0
+
+        set_compose_text(driver, text)
         if media_path is not None:
-            attach_media(media_path, args.wait_seconds)
-            screenshot("existing_profile_media_ready.png")
+            attach_media(driver, media_path, args.wait_seconds)
+            screenshot(driver, "existing_profile_media_ready.png")
         else:
-            screenshot("existing_profile_compose_ready.png")
-        click_post_via_javascript(x_hwnd)
-        screenshot("existing_profile_after_post.png")
+            screenshot(driver, "existing_profile_compose_ready.png")
+
+        if args.draft_only:
+            print('{"success": true, "message": "投稿画面への入力まで完了しました。"}')
+            return 0
+
+        click_post(driver, text)
+        screenshot(driver, "existing_profile_after_post.png")
+        verify_profile(driver, profile_handle, media_path is not None)
         if media_path is not None:
-            verify_media_tab(x_hwnd, args.profile_handle)
-            screenshot("existing_profile_media_tab.png")
-        else:
-            verify_profile(x_hwnd, args.profile_handle)
-            screenshot("existing_profile_profile_tab.png")
-        print('{"success": true, "message": "既存プロフィール経由で投稿を実行しました。"}')
+            screenshot(driver, "existing_profile_media_tab.png")
+        elif profile_handle:
+            screenshot(driver, "existing_profile_profile_tab.png")
+        print('{"success": true, "message": "既存Chromeプロフィールで投稿しました。"}')
         return 0
     except Exception as exc:
-        screenshot("existing_profile_media_error.png")
+        if driver is not None:
+            screenshot(driver, "existing_profile_media_error.png")
         message = str(exc).replace('"', "'")
         print(f'{{"success": false, "message": "{message}"}}')
         return 1
+    finally:
+        cleanup_driver(driver)
 
 
 if __name__ == "__main__":
