@@ -98,6 +98,12 @@ def get_class_name(hwnd: int) -> str:
     return buffer.value
 
 
+def get_window_pid(hwnd: int) -> int:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
 def screenshot(name: str) -> Path:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     path = DEBUG_DIR / name
@@ -105,11 +111,14 @@ def screenshot(name: str) -> Path:
     return path
 
 
-def enumerate_windows() -> list[int]:
+def enumerate_windows(include_untitled: bool = False) -> list[int]:
     windows: list[int] = []
 
     def callback(hwnd: int, _lparam: int) -> bool:
-        if user32.IsWindowVisible(hwnd) and get_window_text(hwnd):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        title = get_window_text(hwnd)
+        if include_untitled or title:
             windows.append(hwnd)
         return True
 
@@ -117,11 +126,21 @@ def enumerate_windows() -> list[int]:
     return windows
 
 
-def find_x_window() -> int:
-    for hwnd in enumerate_windows():
-        if "X - Google Chrome" in get_window_text(hwnd):
-            return hwnd
-    raise RuntimeError("X の Chrome ウィンドウが見つかりませんでした。")
+def find_x_window(chrome_pid: int, timeout_seconds: float = 30.0) -> int:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        for hwnd in enumerate_windows(include_untitled=True):
+            class_name = get_class_name(hwnd)
+            title = get_window_text(hwnd)
+            if get_window_pid(hwnd) == chrome_pid and class_name == "Chrome_WidgetWin_1" and title != "Default IME":
+                return hwnd
+        for hwnd in enumerate_windows(include_untitled=True):
+            class_name = get_class_name(hwnd)
+            title = get_window_text(hwnd)
+            if class_name == "Chrome_WidgetWin_1" and "Google Chrome" in title and ("x.com" in title or " / X" in title):
+                return hwnd
+        time.sleep(0.5)
+    raise RuntimeError("Chrome の起動後に操作対象ウィンドウを見つけられませんでした。")
 
 
 def focus_window(hwnd: int) -> None:
@@ -130,7 +149,7 @@ def focus_window(hwnd: int) -> None:
     time.sleep(0.8)
 
 
-def relaunch_clean_chrome(profile_directory: str) -> None:
+def relaunch_clean_chrome(profile_directory: str) -> int:
     subprocess.run(
         ["taskkill", "/IM", "chrome.exe", "/F"],
         check=False,
@@ -138,7 +157,7 @@ def relaunch_clean_chrome(profile_directory: str) -> None:
         text=True,
     )
     time.sleep(1.0)
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [
             str(CHROME_PATH),
             f"--user-data-dir={SYSTEM_USER_DATA_DIR}",
@@ -149,7 +168,8 @@ def relaunch_clean_chrome(profile_directory: str) -> None:
             "https://x.com/home",
         ]
     )
-    time.sleep(6.0)
+    time.sleep(4.0)
+    return proc.pid
 
 
 def open_compose(hwnd: int, text: str) -> None:
@@ -253,8 +273,8 @@ def main() -> int:
         return 1
 
     try:
-        relaunch_clean_chrome(args.profile_directory)
-        x_hwnd = find_x_window()
+        chrome_pid = relaunch_clean_chrome(args.profile_directory)
+        x_hwnd = find_x_window(chrome_pid)
         open_compose(x_hwnd, text)
         if media_path is not None:
             attach_media(media_path, args.wait_seconds)
