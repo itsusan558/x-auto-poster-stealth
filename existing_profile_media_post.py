@@ -25,7 +25,6 @@ DATA_DIR = BASE_DIR / "data"
 DEBUG_DIR = DATA_DIR / "debug"
 SYSTEM_USER_DATA_DIR = Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
 COMPOSE_URL = "https://x.com/compose/post"
-REMOTE_DEBUGGING_PORT = 9222
 CHROME_CANDIDATES = [
     Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
@@ -58,7 +57,7 @@ def screenshot(driver: webdriver.Chrome, name: str) -> Path:
     return path
 
 
-def relaunch_clean_chrome(profile_directory: str, target_url: str = COMPOSE_URL) -> None:
+def close_running_chrome() -> None:
     subprocess.run(
         ["taskkill", "/IM", "chrome.exe", "/F"],
         check=False,
@@ -66,24 +65,17 @@ def relaunch_clean_chrome(profile_directory: str, target_url: str = COMPOSE_URL)
         text=True,
     )
     time.sleep(1.0)
-    subprocess.Popen(
-        [
-            str(resolve_chrome_path()),
-            f"--user-data-dir={SYSTEM_USER_DATA_DIR}",
-            f"--profile-directory={profile_directory}",
-            f"--remote-debugging-port={REMOTE_DEBUGGING_PORT}",
-            "--disable-extensions",
-            "--hide-crash-restore-bubble",
-            "--disable-session-crashed-bubble",
-            target_url,
-        ]
-    )
-    time.sleep(4.0)
 
 
-def connect_driver() -> webdriver.Chrome:
+def launch_driver(profile_directory: str) -> webdriver.Chrome:
     options = Options()
-    options.add_experimental_option("debuggerAddress", f"127.0.0.1:{REMOTE_DEBUGGING_PORT}")
+    options.add_experimental_option("detach", True)
+    options.binary_location = str(resolve_chrome_path())
+    options.add_argument(f"--user-data-dir={SYSTEM_USER_DATA_DIR}")
+    options.add_argument(f"--profile-directory={profile_directory}")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--hide-crash-restore-bubble")
+    options.add_argument("--disable-session-crashed-bubble")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=options)
 
@@ -232,7 +224,7 @@ def cleanup_driver(driver: webdriver.Chrome | None) -> None:
     if driver is None:
         return
     try:
-        driver.service.stop()
+        driver.quit()
     except Exception:
         pass
 
@@ -252,8 +244,8 @@ def main() -> int:
         return 1
 
     try:
-        relaunch_clean_chrome(args.profile_directory, COMPOSE_URL)
-        driver = connect_driver()
+        close_running_chrome()
+        driver = launch_driver(args.profile_directory)
         wait_for_compose_ready(driver)
 
         if args.open_only:
