@@ -1,34 +1,35 @@
 # X Auto Poster
 
-X への自動投稿を管理する Flask アプリです。通常の Playwright 投稿に加えて、Windows ローカルでは既存の Chrome プロフィールを再利用した画像・動画投稿も行えます。
+既存の Chrome プロフィールを使って X に投稿するローカル向けツールです。
 
-## 主な機能
+## できること
 
-- 複数アカウントの投稿設定管理
-- 予約時刻、Webhook、メディアの設定
-- `今すぐ投稿`
-- `既存Chromeで投稿`
-- Cloud Run / Cloud Scheduler 前提のデプロイ
+- 本文の投稿
+- 画像を最大 4 件まで添付
+- 画像 + 動画 1 本の混在添付
+- ローカル予約投稿
+- `hf-video-compiler` と連携して、作成した動画や画像を取り込み
 
 ## ローカル起動
 
 ```powershell
 pip install -r requirements.txt
 $env:LOCAL_MODE='1'
+$env:PORT='8093'
 py app.py
 ```
 
-既定では `http://127.0.0.1:8080/` で起動します。
+起動後は [http://127.0.0.1:8093/](http://127.0.0.1:8093/) を開いて使います。
 
 ## 既存 Chrome 投稿
 
-Windows ローカルでは、既存の Chrome プロフィールを使う投稿ヘルパーを利用できます。
+Windows ローカルでは、既存の Chrome プロフィールを再利用して投稿します。
 
 ```powershell
-py existing_profile_media_post.py --media-path .\data\media\video-post-test.mp4
+py existing_profile_media_post.py --profile-directory Default --text "テスト投稿"
 ```
 
-この経路は Chrome を再起動します。作業中の Chrome ウィンドウがある場合は注意してください。
+画像や動画を付ける場合は `--media-path` を複数回指定できます。
 
 ## デプロイ
 
