@@ -449,7 +449,7 @@ def main() -> int:
     if missing_paths:
         print_result(False, f"メディアファイルが見つかりません: {missing_paths[0]}")
         return 1
-    if not args.open_only and not media_paths and not text:
+    if not args.open_only and not getattr(args, "setup_login", False) and not media_paths and not text:
         print_result(False, "投稿本文かメディアを指定してください。")
         return 1
 
