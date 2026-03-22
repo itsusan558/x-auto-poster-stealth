@@ -123,17 +123,19 @@ def prepare_automation_profile(profile_directory: str) -> Path:
     if not source_profile_dir.exists():
         raise RuntimeError(f"Chrome プロフィールが見つかりませんでした: {profile_directory}")
 
-    if AUTOMATION_USER_DATA_DIR.exists():
-        shutil.rmtree(AUTOMATION_USER_DATA_DIR, ignore_errors=True)
+    automation_profile_dir = AUTOMATION_USER_DATA_DIR / profile_directory
+    if automation_profile_dir.exists():
+        return AUTOMATION_USER_DATA_DIR
+
     AUTOMATION_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     local_state = SYSTEM_USER_DATA_DIR / "Local State"
-    if local_state.exists():
+    if local_state.exists() and not (AUTOMATION_USER_DATA_DIR / "Local State").exists():
         shutil.copy2(local_state, AUTOMATION_USER_DATA_DIR / "Local State")
 
     shutil.copytree(
         source_profile_dir,
-        AUTOMATION_USER_DATA_DIR / profile_directory,
+        automation_profile_dir,
         ignore=ignore_copy_patterns,
         dirs_exist_ok=True,
     )
@@ -195,7 +197,7 @@ def wait_for_compose_box(page: Page, timeout_ms: int = 45000):
         if "graduated-access" in page.url or page.locator("text=Unlock more on X").count():
             raise RuntimeError("X 側の段階的アクセス制限で投稿画面を開けませんでした。")
         if page.locator(LOGIN_SELECTOR).count() or "flow/login" in page.url:
-            raise RuntimeError("X にログインした Chrome プロフィールで開いてください。")
+            raise RuntimeError("専用ChromeでXにサインインしてください。初回ログイン後は次回以降そのまま使えます。")
         if page.locator("text=Something went wrong").count():
             page.reload(wait_until="domcontentloaded")
         time.sleep(0.4)
