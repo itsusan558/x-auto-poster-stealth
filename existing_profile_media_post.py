@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--open-only", action="store_true", help="only open the compose page")
     parser.add_argument("--draft-only", action="store_true", help="fill the compose box but do not post")
     parser.add_argument("--force-restart", action="store_true", help="force kill and restart automation Chrome")
+    parser.add_argument("--setup-login", action="store_true", help="launch Chrome visibly for one-time X login setup")
     return parser.parse_args()
 
 
@@ -219,14 +220,16 @@ def launch_stealth_chrome(
     user_data_dir: Path,
     profile_directory: str,
     target_url: str = COMPOSE_URL,
+    visible: bool = False,
 ) -> subprocess.Popen:
     """
     Launch Chrome for automation with stealth settings:
-    - Window positioned far off-screen (invisible to user)
+    - Window positioned far off-screen (invisible to user) unless visible=True
     - AutomationControlled flag disabled
     - Stable viewport and locale
     - Does NOT kill the user's existing Chrome
     """
+    window_pos = "--window-position=100,100" if visible else "--window-position=-32000,-32000"
     proc = subprocess.Popen(
         [
             str(resolve_chrome_path()),
@@ -234,8 +237,8 @@ def launch_stealth_chrome(
             f"--profile-directory={profile_directory}",
             f"--remote-debugging-address={REMOTE_DEBUGGING_HOST}",
             f"--remote-debugging-port={debug_port}",
-            # Stealth: move window completely off-screen
-            "--window-position=-32000,-32000",
+            # Stealth: move window off-screen (or show for login setup)
+            window_pos,
             "--window-size=1280,800",
             # Stealth: reduce automation fingerprint
             "--disable-blink-features=AutomationControlled",
@@ -260,6 +263,7 @@ def ensure_automation_chrome_running(
     profile_directory: str,
     target_url: str = COMPOSE_URL,
     force_restart: bool = False,
+    visible: bool = False,
 ) -> int:
     """
     Return a debug port for a running automation Chrome.
@@ -288,8 +292,9 @@ def ensure_automation_chrome_running(
     automation_user_data_dir = prepare_automation_profile(profile_directory)
     debug_port = find_free_port()
 
-    print(f"[stealth] Launching automation Chrome off-screen on port {debug_port}")
-    proc = launch_stealth_chrome(debug_port, automation_user_data_dir, profile_directory, target_url)
+    label = "visibly (login setup)" if visible else "off-screen"
+    print(f"[stealth] Launching automation Chrome {label} on port {debug_port}")
+    proc = launch_stealth_chrome(debug_port, automation_user_data_dir, profile_directory, target_url, visible=visible)
 
     save_chrome_worker_state({"pid": proc.pid, "port": debug_port})
 
@@ -453,11 +458,17 @@ def main() -> int:
 
     try:
         # Stealth: reuse existing automation Chrome if already running
+        setup_login = getattr(args, "setup_login", False)
+        login_url = "https://x.com/i/flow/login" if setup_login else COMPOSE_URL
         debug_port = ensure_automation_chrome_running(
             args.profile_directory,
-            COMPOSE_URL,
-            force_restart=args.force_restart,
+            login_url,
+            force_restart=args.force_restart or setup_login,
+            visible=setup_login,
         )
+        if setup_login:
+            print(json.dumps({"info": "Chromeが表示されました。Xにログイン後、このウィンドウは閉じずそのままにしてください。次回から --setup-login なしで投稿できます。"}, ensure_ascii=False))
+            return 0
 
         playwright = sync_playwright().start()
         browser = playwright.chromium.connect_over_cdp(f"http://{REMOTE_DEBUGGING_HOST}:{debug_port}")
