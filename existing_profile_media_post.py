@@ -199,12 +199,18 @@ def prepare_automation_profile(profile_directory: str) -> Path:
     if local_state.exists() and not (AUTOMATION_USER_DATA_DIR / "Local State").exists():
         shutil.copy2(local_state, AUTOMATION_USER_DATA_DIR / "Local State")
 
-    shutil.copytree(
-        source_profile_dir,
-        automation_profile_dir,
-        ignore=ignore_copy_patterns,
-        dirs_exist_ok=True,
-    )
+    try:
+        shutil.copytree(
+            source_profile_dir,
+            automation_profile_dir,
+            ignore=ignore_copy_patterns,
+            dirs_exist_ok=True,
+        )
+    except shutil.Error as exc:
+        # Some files (Cookies, Sessions) are locked when Chrome is running.
+        # Skip them and continue — the automation Chrome will prompt login once if needed.
+        locked = [e[0] for e in exc.args[0]]
+        print(f"[stealth] Profile copy: {len(locked)} locked file(s) skipped (Chrome is running)")
     return AUTOMATION_USER_DATA_DIR
 
 
