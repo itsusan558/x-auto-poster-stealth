@@ -89,7 +89,13 @@ async def _do_post(
         browser = await playwright.chromium.launch(
             headless=os.environ.get("HEADLESS", "true").lower() != "false",
             args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--lang=ja-JP",
+                "--accept-lang=ja-JP,ja,en-US,en",
+                "--window-size=1280,800",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=site-per-process",
                 "--disable-dev-shm-usage",
             ],
         )

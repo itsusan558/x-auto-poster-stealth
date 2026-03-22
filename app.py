@@ -1854,3 +1854,48 @@ if __name__ == "__main__":
     ensure_local_dirs()
     ensure_scheduler_started()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
+
+
+# ── Stealth: Chrome worker management endpoints ────────────────────────────
+
+@app.route("/chrome-worker/status")
+def chrome_worker_status():
+    """Return the current automation Chrome worker state."""
+    try:
+        import chrome_worker as _cw
+        return jsonify(_cw.worker_status())
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@app.route("/chrome-worker/start", methods=["POST"])
+def chrome_worker_start():
+    """Start the background automation Chrome worker (if not already running)."""
+    try:
+        import chrome_worker as _cw
+        profile = request.json.get("profile_directory", DEFAULT_CHROME_PROFILE) if request.is_json else DEFAULT_CHROME_PROFILE
+        return jsonify(_cw.start_worker(profile))
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@app.route("/chrome-worker/stop", methods=["POST"])
+def chrome_worker_stop():
+    """Stop the background automation Chrome worker."""
+    try:
+        import chrome_worker as _cw
+        return jsonify(_cw.stop_worker())
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@app.route("/chrome-worker/restart", methods=["POST"])
+def chrome_worker_restart():
+    """Restart the background automation Chrome worker."""
+    try:
+        import chrome_worker as _cw
+        profile = request.json.get("profile_directory", DEFAULT_CHROME_PROFILE) if request.is_json else DEFAULT_CHROME_PROFILE
+        _cw.stop_worker()
+        return jsonify(_cw.start_worker(profile))
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
