@@ -72,6 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--draft-only", action="store_true", help="fill the compose box but do not post")
     parser.add_argument("--force-restart", action="store_true", help="force kill and restart automation Chrome")
     parser.add_argument("--setup-login", action="store_true", help="launch Chrome visibly for one-time X login setup")
+    parser.add_argument("--reply-to-url", default="", help="tweet URL to reply to")
+    parser.add_argument("--thread-json", default="", help="path to JSON file with thread tweets list")
     return parser.parse_args()
 
 
@@ -431,6 +433,52 @@ def submit_post(page: Page, text: str) -> None:
         raise RuntimeError("投稿後も本文が残っており、完了を確認できませんでした。")
 
 
+ADD_TWEET_SELECTOR = '[data-testid="addButton"]'
+
+
+def post_thread(page: Page, tweets: list[dict]) -> None:
+    """X のネイティブスレッドコンポーザーで複数ツイートを投稿する。"""
+    if not tweets:
+        return
+
+    for i, tweet in enumerate(tweets):
+        text = normalize_text(tweet.get("text", ""))
+        media_paths = [Path(p) for p in tweet.get("media_paths", []) if Path(p).exists()]
+
+        if i == 0:
+            # 1枚目: 既存の compose box に入力
+            wait_for_compose_box(page)
+            set_compose_text(page, text)
+            if media_paths:
+                attach_media(page, media_paths, wait_seconds=20)
+        else:
+            # 2枚目以降: 「ツイートをさらに追加」ボタンをクリック
+            add_btn = page.locator(ADD_TWEET_SELECTOR).first
+            add_btn.wait_for(state="visible", timeout=15000)
+            add_btn.click()
+            page.wait_for_timeout(800)
+
+            # 最後の compose box に入力
+            boxes = page.locator(COMPOSE_BOX_SELECTOR)
+            last_box = boxes.last
+            last_box.wait_for(state="visible", timeout=10000)
+            last_box.click()
+            page.wait_for_timeout(300)
+            if text:
+                page.keyboard.insert_text(text)
+                page.wait_for_timeout(500)
+            if media_paths:
+                attach_media(page, media_paths, wait_seconds=20)
+
+    # 全ツイート入力後に投稿
+    button = page.locator(POST_BUTTON_SELECTOR).first
+    button.wait_for(state="visible", timeout=15000)
+    if not button.is_enabled():
+        raise RuntimeError("投稿ボタンが有効になりませんでした。")
+    button.click()
+    page.wait_for_timeout(3000)
+
+
 def verify_target(page: Page, profile_handle: str, has_media: bool) -> None:
     if not profile_handle:
         return
@@ -476,12 +524,31 @@ def main() -> int:
             raise RuntimeError("Chrome の既存プロフィールに接続できませんでした。")
         context = browser.contexts[0]
         page = get_or_create_page(context)
-        page.goto(COMPOSE_URL, wait_until="domcontentloaded", timeout=45000)
-        page.wait_for_timeout(1200)
+
+        reply_to_url = (getattr(args, "reply_to_url", "") or "").strip()
+        if reply_to_url:
+            # ツイートページに遷移して返信ボタンをクリック
+            page.goto(reply_to_url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(2000)
+            reply_btn = page.locator('[data-testid="reply"]').first
+            reply_btn.wait_for(state="visible", timeout=15000)
+            reply_btn.click()
+            page.wait_for_timeout(1500)
+        else:
+            page.goto(COMPOSE_URL, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(1200)
 
         if args.open_only:
             save_page_screenshot(page, "existing_profile_open_only.png")
             print_result(True, "既存Chromeプロフィールで投稿画面を開きました。")
+            return 0
+
+        thread_json_path = (getattr(args, "thread_json", "") or "").strip()
+        if thread_json_path and Path(thread_json_path).exists():
+            tweets = json.loads(Path(thread_json_path).read_text(encoding="utf-8"))
+            post_thread(page, tweets)
+            save_page_screenshot(page, "existing_profile_thread_done.png")
+            print_result(True, f"スレッド {len(tweets)} 件を投稿しました。")
             return 0
 
         wait_for_compose_box(page)

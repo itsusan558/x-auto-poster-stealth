@@ -28,8 +28,22 @@ async def main() -> int:
     STATUS_PATH.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=False, slow_mo=50)
-        context = await browser.new_context(locale="ja-JP", viewport={"width": 1280, "height": 800})
+        browser = await playwright.chromium.launch(
+            headless=False,
+            slow_mo=50,
+            channel="chrome",
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        context = await browser.new_context(
+            locale="ja-JP",
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = await context.new_page()
         await page.goto("https://x.com/i/flow/login", wait_until="domcontentloaded", timeout=60000)
 

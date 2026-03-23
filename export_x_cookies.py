@@ -20,7 +20,7 @@ DATA_DIR = BASE_DIR / "data"
 OUTPUT_PATH = DATA_DIR / "selenium_cookies_0.json"
 USER_DATA_DIR = Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data"
 LOCAL_STATE_PATH = USER_DATA_DIR / "Local State"
-COOKIES_DB_PATH = USER_DATA_DIR / "Default" / "Network" / "Cookies"
+COOKIES_DB_PATH = USER_DATA_DIR / "Profile 1" / "Network" / "Cookies"
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -59,13 +59,19 @@ def get_master_key() -> bytes:
     return _dpapi_decrypt(encrypted_key)
 
 
-def decrypt_cookie_value(encrypted_value: bytes, master_key: bytes) -> str:
+def decrypt_cookie_value(encrypted_value: bytes, master_key: bytes) -> str | None:
     if encrypted_value.startswith(b"v10") or encrypted_value.startswith(b"v11"):
         nonce = encrypted_value[3:15]
         ciphertext = encrypted_value[15:-16]
         tag = encrypted_value[-16:]
         return AESGCM(master_key).decrypt(nonce, ciphertext + tag, None).decode("utf-8")
-    return _dpapi_decrypt(encrypted_value).decode("utf-8")
+    if encrypted_value.startswith(b"v20"):
+        # Chrome 127+ App-Bound Encryption — 対応不可
+        return None
+    try:
+        return _dpapi_decrypt(encrypted_value).decode("utf-8")
+    except Exception:
+        return None
 
 
 def export_x_cookies() -> list[dict]:
@@ -73,6 +79,7 @@ def export_x_cookies() -> list[dict]:
     shutil.copy2(COOKIES_DB_PATH, temp_db)
     master_key = get_master_key()
     conn = sqlite3.connect(temp_db)
+    conn.text_factory = bytes  # BLOBをUTF-8デコードしない
     cur = conn.cursor()
     cur.execute(
         """
@@ -86,7 +93,15 @@ def export_x_cookies() -> list[dict]:
 
     cookies: list[dict] = []
     for host_key, path, is_secure, expires_utc, name, encrypted_value in rows:
+        if isinstance(host_key, bytes):
+            host_key = host_key.decode("utf-8")
+        if isinstance(path, bytes):
+            path = path.decode("utf-8")
+        if isinstance(name, bytes):
+            name = name.decode("utf-8")
         value = decrypt_cookie_value(encrypted_value, master_key)
+        if value is None:
+            continue
         cookie = {
             "domain": host_key,
             "path": path,

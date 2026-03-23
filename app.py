@@ -34,6 +34,7 @@ VERSION = "1.10.3"
 STATE_FILE = "state.json"
 LOG_FILE = "post_log.json"
 SCHEDULE_FILE = "schedules.json"
+TEMPLATES_FILE = "templates.json"
 MAX_LOGS = 30
 SCHEDULE_POLL_SECONDS = 15
 FOLLOW_REVIEW_FILE = "follow_review.json"
@@ -502,6 +503,14 @@ def add_log(success: bool, message: str, content: str, media_filename: str, sour
     data_write(LOG_FILE, logs[:MAX_LOGS])
 
 
+def get_templates() -> list[dict]:
+    return data_read(TEMPLATES_FILE) or []
+
+
+def save_templates(templates: list[dict]) -> None:
+    data_write(TEMPLATES_FILE, templates)
+
+
 def existing_profile_available() -> bool:
     return LOCAL_MODE and os.name == "nt" and EXISTING_PROFILE_SCRIPT.exists()
 
@@ -648,7 +657,7 @@ def next_pending_schedule(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def execute_post(content: str, media_data: Any, media_filename: str, profile_handle: str, source: str) -> tuple[bool, str]:
+def execute_post(content: str, media_data: Any, media_filename: str, profile_handle: str, source: str, reply_to_url: str = "") -> tuple[bool, str]:
     extra_args: list[str] = []
     if content:
         extra_args.extend(["--text", content])
@@ -664,6 +673,8 @@ def execute_post(content: str, media_data: Any, media_filename: str, profile_han
         extra_args.extend(["--media-path", item.get("path", "")])
     if profile_handle:
         extra_args.extend(["--profile-handle", profile_handle])
+    if reply_to_url:
+        extra_args.extend(["--reply-to-url", reply_to_url])
 
     with _posting_lock:
         success, message = run_existing_profile_command(extra_args)
@@ -1062,276 +1073,941 @@ HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>X 自動投稿</title>
   <style>
-    *{box-sizing:border-box}body{margin:0;font-family:"Segoe UI","Yu Gothic UI",sans-serif;background:#f6efe4;color:#1f2a33}
-    .shell{max-width:1000px;margin:0 auto;padding:24px 16px 40px}.card{background:#fffaf2;border:1px solid #dfcfb8;border-radius:20px;padding:18px;box-shadow:0 12px 30px rgba(93,72,40,.08)}
-    .card+.card{margin-top:16px}.grid{display:grid;grid-template-columns:1.35fr .95fr;gap:16px}.top,.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row.space{justify-content:space-between}
-    h1,h2,p{margin:0}.badge,.pill{display:inline-block;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:700}.badge{background:#dceaf7;color:#235884}
-    .pill.ok{background:#e3f6e7;color:#24643a}.pill.ng{background:#fbe6e7;color:#8a2f3b}.pill.wait{background:#e7f0fa;color:#285982}.pill.run{background:#fff1d8;color:#7d5a0d}
-    .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-top:14px}.metric,.box,.item{background:#faf4ea;border:1px solid #e3d4be;border-radius:16px;padding:14px}
-    .label,.muted{font-size:12px;color:#746857}.value{margin-top:6px;font-size:18px;font-weight:700;word-break:break-word}.sub{margin-top:8px;color:#5f6f7d;line-height:1.7}
-    textarea,input[type="datetime-local"]{width:100%;border:1px solid #d8c6aa;border-radius:14px;background:#fffdf9;padding:14px 16px;font-size:15px;color:#1f2a33}
-    textarea{min-height:220px;resize:vertical;line-height:1.7}.field{margin-top:14px}.field label{display:block;margin-bottom:8px;font-size:13px;font-weight:700;color:#6d6255}
-    .meta{margin-top:10px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:#7b6f61;font-size:13px}.btn{border:none;border-radius:14px;padding:12px 16px;font-size:14px;font-weight:700;cursor:pointer}
-    .btn:disabled{opacity:.55;cursor:not-allowed}.btn-primary{background:#2f6ea8;color:#fff}.btn-secondary{background:#d7e5f2;color:#244c72}.btn-soft{background:#efe2cf;color:#6b4d27}.btn-danger{background:#ead0d0;color:#8d343d}
-    .status{display:none;margin-top:14px;padding:12px 14px;border-radius:14px;line-height:1.6}.status.ok{display:block;background:#e3f6e7;border:1px solid #9fd0a8;color:#24643a}.status.err{display:block;background:#fbe6e7;border:1px solid #e3a2a7;color:#8a2f3b}.status.info{display:block;background:#e7f0fa;border:1px solid #a9c6e6;color:#285982}
-    .hint{margin-top:14px;padding:14px;background:#fff7ea;border:1px solid #edd7af;border-radius:16px;color:#715a2f;line-height:1.7}.preview{margin-top:12px;border-radius:14px;overflow:hidden;border:1px solid #e0cfb4;background:#fff}
-    .preview img,.preview video{width:100%;max-height:300px;object-fit:contain;display:block}.list{display:grid;gap:10px;margin-top:12px}
-    .editor-shell{margin-top:16px}.editor-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.editor-actions{display:flex;gap:10px;flex-wrap:wrap}.editor-frame{width:100%;height:920px;border:1px solid #dfcfb8;border-radius:18px;background:#0f0f0f;margin-top:14px}
-    @media (max-width:900px){.grid{grid-template-columns:1fr}}@media (max-width:640px){.row,.row.space,.meta{flex-direction:column;align-items:stretch}.btn{width:100%}}
+    :root{
+      --bg:#000;--surface:#0d1117;--surface2:#161b22;--surface3:#1c2128;
+      --border:#2f3336;--accent:#1d9bf0;--accent-hover:#1a8cd8;
+      --text:#e7e9ea;--text2:#71767b;--text3:#536471;
+      --green:#00ba7c;--red:#f4212e;--orange:#ffd400;
+      --r:16px;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth}
+    body{font-family:-apple-system,"Segoe UI","Yu Gothic UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
+
+    /* ── Layout ── */
+    .app{display:grid;grid-template-columns:240px 1fr;min-height:100vh;max-width:1280px;margin:0 auto}
+
+    /* ── Sidebar ── */
+    .sidebar{position:sticky;top:0;height:100vh;padding:12px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:4px;overflow-y:auto}
+    .sidebar-logo{display:flex;align-items:center;gap:12px;padding:12px;margin-bottom:8px}
+    .sidebar-logo svg{fill:var(--text);width:28px;height:28px;flex-shrink:0}
+    .sidebar-logo span{font-size:20px;font-weight:700}
+    .nav-item{display:flex;align-items:center;gap:16px;padding:12px 16px;border-radius:999px;cursor:pointer;font-size:16px;font-weight:400;color:var(--text);border:none;background:none;width:100%;text-align:left;transition:background .15s}
+    .nav-item:hover{background:rgba(255,255,255,.08)}
+    .nav-item.active{font-weight:700}
+    .nav-item svg{width:22px;height:22px;flex-shrink:0}
+    .sidebar-status{margin-top:auto;padding:12px;border-radius:12px;background:var(--surface);border:1px solid var(--border)}
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text3);margin-right:6px}
+    .status-dot.on{background:var(--green)}
+    .status-row{display:flex;align-items:center;font-size:12px;color:var(--text2);padding:3px 0}
+
+    /* ── Main ── */
+    .main{min-height:100vh;border-right:1px solid var(--border)}
+    .main-header{position:sticky;top:0;z-index:10;backdrop-filter:blur(12px);background:rgba(0,0,0,.85);padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .main-header h1{font-size:20px;font-weight:700}
+
+    /* ── Tabs ── */
+    .tabs{display:flex;border-bottom:1px solid var(--border)}
+    .tab{flex:1;padding:14px;font-size:15px;font-weight:500;color:var(--text2);border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s;position:relative}
+    .tab:hover{background:rgba(255,255,255,.04);color:var(--text)}
+    .tab.active{color:var(--text);font-weight:700;border-bottom-color:var(--accent)}
+    .tab-badge{position:absolute;top:10px;right:calc(50% - 24px);background:var(--accent);color:#fff;border-radius:999px;padding:1px 6px;font-size:10px;font-weight:700}
+
+    /* ── Tab panels ── */
+    .panel{display:none;padding:0 0 60px}
+    .panel.active{display:block}
+
+    /* ── Compose box ── */
+    .compose-area{padding:16px 20px;border-bottom:1px solid var(--border)}
+    .compose-inner{display:flex;gap:12px}
+    .avatar{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),#7856ff);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:#fff}
+    .compose-right{flex:1;min-width:0}
+    .compose-textarea{width:100%;background:none;border:none;outline:none;color:var(--text);font-size:18px;font-family:inherit;resize:none;line-height:1.6;min-height:120px;padding:8px 0}
+    .compose-textarea::placeholder{color:var(--text3)}
+    .compose-media-preview{display:grid;gap:4px;border-radius:16px;overflow:hidden;margin-top:8px;border:1px solid var(--border)}
+    .compose-media-preview.count-1{grid-template-columns:1fr}
+    .compose-media-preview.count-2{grid-template-columns:1fr 1fr}
+    .compose-media-preview.count-3{grid-template-columns:1fr 1fr;grid-template-rows:auto auto}
+    .compose-media-preview.count-4{grid-template-columns:1fr 1fr}
+    .compose-media-preview img,.compose-media-preview video{width:100%;height:200px;object-fit:cover;display:block;background:#111}
+    .compose-media-preview.count-1 img,.compose-media-preview.count-1 video{height:300px}
+    .compose-actions{display:flex;align-items:center;padding:10px 20px;border-bottom:1px solid var(--border);gap:4px}
+    .compose-btn{width:36px;height:36px;border-radius:50%;border:none;background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--accent);transition:background .15s}
+    .compose-btn:hover{background:rgba(29,155,240,.12)}
+    .compose-btn:disabled{opacity:.3;cursor:not-allowed}
+    .compose-btn svg{width:18px;height:18px}
+    .compose-footer{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid var(--border)}
+    .char-ring{position:relative;width:30px;height:30px;flex-shrink:0}
+    .char-ring svg{transform:rotate(-90deg)}
+    .char-ring .ring-bg{fill:none;stroke:var(--surface3);stroke-width:3}
+    .char-ring .ring-fill{fill:none;stroke:var(--accent);stroke-width:3;stroke-linecap:round;transition:stroke-dashoffset .1s,stroke .1s}
+    .char-ring .ring-num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--text2)}
+    .post-btn{background:var(--text);color:#000;border:none;border-radius:999px;padding:8px 20px;font-size:15px;font-weight:700;cursor:pointer;transition:opacity .15s;display:flex;align-items:center;gap:6px}
+    .post-btn:disabled{opacity:.4;cursor:not-allowed}
+    .post-btn:not(:disabled):hover{opacity:.85}
+    .post-btn-group{display:flex;align-items:stretch;gap:1px}
+    .post-btn-group .post-btn{border-radius:999px 0 0 999px}
+    .sched-toggle-btn{border-radius:0 999px 999px 0!important;padding:8px 12px!important;border-left:1px solid rgba(0,0,0,.15)!important;}
+    .open-btn{background:none;border:1px solid var(--border);color:var(--text);border-radius:999px;padding:8px 16px;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s;margin-right:8px}
+    .open-btn:hover{background:rgba(255,255,255,.06)}
+    .open-btn:disabled{opacity:.4;cursor:not-allowed}
+
+    /* ── Drop zone ── */
+    .drop-hint{margin:12px 20px;padding:20px;border:2px dashed var(--border);border-radius:12px;text-align:center;color:var(--text2);font-size:13px;cursor:pointer;transition:border-color .15s,background .15s}
+    .drop-hint:hover,.drop-hint.dragover{border-color:var(--accent);background:rgba(29,155,240,.06);color:var(--accent)}
+
+    /* ── Autosave ── */
+    .autosave{font-size:12px;color:var(--text3)}
+
+    /* ── Schedule panel ── */
+    .section{padding:20px}
+    .section-title{font-size:17px;font-weight:700;margin-bottom:16px}
+    .schedule-form{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:20px}
+    .label-text{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;display:block}
+    input[type="datetime-local"]{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:14px;color:var(--text);outline:none}
+    input[type="datetime-local"]:focus{border-color:var(--accent)}
+    input[type="datetime-local"]::-webkit-calendar-picker-indicator{filter:invert(1) opacity(.5)}
+    .sched-btn{width:100%;margin-top:12px;background:var(--accent);color:#fff;border:none;border-radius:999px;padding:10px;font-size:15px;font-weight:700;cursor:pointer;transition:background .15s}
+    .sched-btn:hover{background:var(--accent-hover)}
+    .sched-btn:disabled{opacity:.4;cursor:not-allowed}
+
+    /* ── Schedule items ── */
+    .sched-item{display:flex;flex-direction:column;gap:6px;padding:14px 16px;border-bottom:1px solid var(--border);transition:background .1s}
+    .sched-item:hover{background:rgba(255,255,255,.03)}
+    .sched-top{display:flex;justify-content:space-between;align-items:center}
+    .sched-time{font-size:14px;font-weight:600}
+    .sched-content{font-size:14px;color:var(--text2);white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .sched-meta{display:flex;align-items:center;gap:8px}
+    .pill{display:inline-flex;align-items:center;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;gap:4px}
+    .pill.ok{background:rgba(0,186,124,.15);color:var(--green)}
+    .pill.ng{background:rgba(244,33,46,.15);color:var(--red)}
+    .pill.wait{background:rgba(29,155,240,.15);color:var(--accent)}
+    .pill.run{background:rgba(255,212,0,.15);color:var(--orange)}
+    .del-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px;transition:color .15s,background .15s}
+    .del-btn:hover{color:var(--red);background:rgba(244,33,46,.1)}
+    .empty-state{padding:60px 20px;text-align:center;color:var(--text3)}
+    .empty-state svg{width:40px;height:40px;opacity:.3;margin-bottom:12px}
+    .empty-state p{font-size:14px}
+
+    /* ── Log items ── */
+    .log-item{padding:14px 20px;border-bottom:1px solid var(--border);transition:background .1s}
+    .log-item:hover{background:rgba(255,255,255,.03)}
+    .log-top{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+    .log-content{font-size:14px;color:var(--text2);white-space:pre-wrap;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+    .log-meta{font-size:12px;color:var(--text3);margin-top:4px}
+
+    /* ── Video panel ── */
+    .video-panel-head{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--border)}
+    .video-actions{display:flex;gap:8px}
+    .v-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:999px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}
+    .v-btn:hover{background:var(--surface3)}
+    .v-btn:disabled{opacity:.4;cursor:not-allowed}
+    .editor-frame{width:100%;height:calc(100vh - 110px);border:none;background:#111;display:block}
+
+    /* ── Stats bar ── */
+    .stats-bar{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--border)}
+    .stat{padding:16px 20px;border-right:1px solid var(--border)}
+    .stat:last-child{border-right:none}
+    .stat-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+    .stat-value{font-size:18px;font-weight:700;margin-top:4px;word-break:break-word}
+    .stat-value#media-name{font-size:14px}
+
+    /* ── Toast ── */
+    .toast-wrap{position:fixed;bottom:24px;right:24px;display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none}
+    .toast{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 16px;font-size:14px;font-weight:500;min-width:240px;max-width:340px;box-shadow:0 8px 32px rgba(0,0,0,.6);display:flex;align-items:center;gap:10px;pointer-events:auto;animation:slideIn .2s ease}
+    .toast.ok{border-left:3px solid var(--green);color:var(--text)}
+    .toast.err{border-left:3px solid var(--red);color:var(--text)}
+    .toast.info{border-left:3px solid var(--accent);color:var(--text)}
+    @keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+    @keyframes slideOut{to{transform:translateX(20px);opacity:0}}
+    .toast.out{animation:slideOut .2s ease forwards}
+
+    /* ── Spinner ── */
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+    .spinner.dark{border-color:rgba(0,0,0,.2);border-top-color:#000}
+
+    /* ── Compiler picker ── */
+    #compiler-picker{padding:16px 20px;border-bottom:1px solid var(--border);display:none}
+
+    /* ── Thread composer ── */
+    #thread-composer{padding:0}
+    .thread-item{display:flex;gap:0;padding:16px 20px 0;position:relative}
+    .thread-left{display:flex;flex-direction:column;align-items:center;width:48px;flex-shrink:0}
+    .thread-line{width:2px;background:var(--border);flex:1;min-height:20px;margin-top:8px;border-radius:1px}
+    .thread-item:last-child .thread-line{display:none}
+    .thread-right{flex:1;min-width:0;padding-bottom:16px}
+    .thread-item-meta{display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+    .thread-label{font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+    .thread-char-count{font-size:12px;color:var(--text3)}
+    .thread-char-count.warn{color:var(--orange)}
+    .thread-char-count.over{color:var(--red)}
+    .thread-del-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:4px;border-radius:6px;display:flex;align-items:center;justify-content:center;transition:color .15s,background .15s}
+    .thread-del-btn:hover{color:var(--red);background:rgba(244,33,46,.1)}
+    /* ── Templates ── */
+    .tpl-item{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:12px;cursor:pointer;transition:background .1s}
+    .tpl-item:hover{background:rgba(29,155,240,.06)}
+    .tpl-item:hover .tpl-name{color:var(--accent)}
+    .tpl-body{flex:1;min-width:0}
+    .tpl-name{font-size:14px;font-weight:600;margin-bottom:3px;transition:color .1s}
+    .tpl-preview{font-size:13px;color:var(--text2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    .tpl-actions{display:flex;gap:6px;flex-shrink:0;align-self:center}
+    .tpl-use-btn{background:var(--accent);color:#fff;border:none;border-radius:999px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+    .tpl-del-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px}
+    .tpl-del-btn:hover{color:var(--red);background:rgba(244,33,46,.1)}
+    /* ── Reply bar ── */
+    #reply-bar{display:none}
+    /* ── Misc ── */
+    .hint-bar{padding:12px 20px;background:rgba(255,212,0,.06);border-bottom:1px solid rgba(255,212,0,.15);color:var(--orange);font-size:13px}
+
+    /* ── Responsive ── */
+    @media(max-width:900px){
+      .app{grid-template-columns:1fr}
+      .sidebar{display:none}
+      .stats-bar{grid-template-columns:repeat(2,1fr)}
+    }
+    @media(max-width:540px){
+      .stats-bar{grid-template-columns:1fr}
+      .stat{border-right:none}
+      .compose-footer{flex-wrap:wrap;gap:8px}
+    }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <div class="card">
-      <div class="top">
-        <h1>X 自動投稿</h1>
-        <span class="badge">v{{ version }}</span>
-        <span class="badge">{{ storage_mode }}</span>
-        <span class="badge">{{ "既存Chrome利用可" if existing_profile_available else "既存Chrome利用不可" }}</span>
+
+<!-- Toast container -->
+<div class="toast-wrap" id="toast-wrap"></div>
+
+<div class="app">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.73-8.835L1.254 2.25H8.08l4.253 5.622zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+    </div>
+    <button class="nav-item active" onclick="switchTab('compose')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+      投稿
+    </button>
+    <button class="nav-item" onclick="switchTab('schedule')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      予約管理
+    </button>
+    <button class="nav-item" onclick="switchTab('video')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23,7 16,12 23,17"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+      動画編集
+    </button>
+    <button class="nav-item" onclick="switchTab('templates')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 10h16M4 14h8"/><rect x="14" y="12" width="8" height="8" rx="1"/></svg>
+      テンプレート
+    </button>
+    <button class="nav-item" onclick="switchTab('log')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      ログ
+    </button>
+
+    <div class="sidebar-status">
+      <div class="status-row">
+        <span class="status-dot {{ 'on' if existing_profile_available else '' }}"></span>
+        {{ "Chrome 接続済" if existing_profile_available else "Chrome 未接続" }}
       </div>
-      <p class="sub">既存の Chrome プロフィールで X に投稿します。画像・動画の投稿と、ローカルで動く予約投稿に対応しています。</p>
-      <div class="summary">
-        <div class="metric"><div class="label">現在のメディア</div><div class="value" id="media-name">{{ state.media_summary or "未選択" }}</div></div>
-        <div class="metric"><div class="label">最後の投稿</div><div class="value">{{ state.last_post_at or "まだありません" }}</div></div>
-        <div class="metric"><div class="label">次の予約</div><div class="value">{{ next_schedule.scheduled_at_display if next_schedule else "なし" }}</div></div>
-        <div class="metric"><div class="label">使用プロフィール</div><div class="value">{{ chrome_profile }}</div></div>
+      <div class="status-row">
+        <span class="status-dot {{ 'on' if video_compiler_running else '' }}"></span>
+        {{ "動画ツール 起動中" if video_compiler_running else "動画ツール 停止中" }}
       </div>
+      <div class="status-row" style="margin-top:6px;color:var(--text3);font-size:11px;">v{{ version }} · {{ chrome_profile }}</div>
+    </div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main class="main">
+    <div class="main-header">
+      <h1 id="page-title">投稿</h1>
     </div>
 
-    <div class="grid" style="margin-top:16px;">
-      <div class="card">
-        <h2>投稿内容</h2>
-        <p class="sub">本文とメディアを作って、今すぐ投稿するか、そのまま予約できます。</p>
-        <div class="field"><label for="content">本文</label><textarea id="content" placeholder="ここに投稿文を書いてください。">{{ state.content }}</textarea></div>
-        <div class="meta"><div id="autosave">下書きは自動保存されます。</div><div><span id="char-count">0</span> 文字</div></div>
-        <div class="box" style="margin-top:16px;">
-          <div class="row space">
-            <div><div class="label">画像・動画</div><div class="value" style="font-size:16px;" id="media-label">{{ state.media_summary or "なし" }}</div></div>
-            <div class="row">
-              <label class="btn btn-soft">画像・動画を選ぶ<input id="media-input" type="file" accept="image/*,video/*" multiple style="display:none"></label>
-              <button class="btn btn-soft" type="button" onclick="openCompilerPicker(event)" {% if not video_compiler_available %}disabled{% endif %}>Fanzaコンパイラから反映</button>
-              <button class="btn btn-secondary" onclick="clearMedia()">メディアを外す</button>
+    <!-- Stats bar -->
+    <div class="stats-bar">
+      <div class="stat"><div class="stat-label">メディア</div><div class="stat-value" id="media-name">{{ state.media_summary or "未選択" }}</div></div>
+      <div class="stat"><div class="stat-label">最後の投稿</div><div class="stat-value" style="font-size:14px;">{{ state.last_post_at or "—" }}</div></div>
+      <div class="stat"><div class="stat-label">次の予約</div><div class="stat-value" style="font-size:14px;">{{ next_schedule.scheduled_at_display if next_schedule else "なし" }}</div></div>
+      <div class="stat"><div class="stat-label">予約数</div><div class="stat-value">{{ schedules|length }}</div></div>
+    </div>
+
+    <!-- ── Compose panel ── -->
+    <div class="panel active" id="panel-compose">
+
+      <!-- 返信先バー -->
+      <div id="reply-bar" style="display:none;padding:10px 20px;background:rgba(29,155,240,.06);border-bottom:1px solid rgba(29,155,240,.2);align-items:center;gap:10px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="9,17 4,12 9,7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+        <span style="font-size:13px;color:var(--accent);font-weight:600;">返信先URL</span>
+        <input id="reply-to-url" type="url" placeholder="https://x.com/user/status/..."
+          style="flex:1;background:transparent;border:none;outline:none;font-size:13px;color:var(--text);min-width:0;">
+        <button onclick="clearReply()" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:18px;line-height:1;padding:0 4px;">×</button>
+      </div>
+
+      <!-- スレッドコンポーザー -->
+      <div id="thread-composer">
+        <!-- 本投稿 -->
+        <div class="thread-item" data-index="0">
+          <div class="thread-left">
+            <div class="avatar">X</div>
+            <div class="thread-line"></div>
+          </div>
+          <div class="thread-right">
+            <textarea class="compose-textarea" id="content" placeholder="いまどうしてる？" rows="4">{{ state.content }}</textarea>
+            <div id="preview-area"></div>
+            <div class="thread-item-meta">
+              <span class="thread-label">本投稿</span>
+              <span class="thread-char-count" id="char-count-0">0 / 280</span>
             </div>
           </div>
-          <div id="preview-area"></div>
         </div>
-        <div class="row" style="margin-top:16px;">
-          <button class="btn btn-secondary" onclick="openX(event)" {% if not existing_profile_available %}disabled{% endif %}>既存Chromeで投稿画面を開く</button>
-          <button class="btn btn-primary" onclick="postNow(event)" {% if not existing_profile_available %}disabled{% endif %}>今すぐ投稿する</button>
-        </div>
-        <div class="hint">予約投稿はこのアプリがローカルで動いている間だけ実行されます。予約時刻に PC がスリープしていると実行できません。</div>
-        <div id="status" class="status" data-shared-status="1"></div>
+        <!-- 返信欄はJSで追加 -->
       </div>
 
-      <div class="card">
-        <h2>予約投稿</h2>
-        <p class="sub">今の本文と今のメディアを、その時点の内容で保存して指定時刻に投稿します。</p>
-        <div class="box">
-          <div class="field" style="margin-top:0;"><label for="schedule-at">予約日時</label><input id="schedule-at" type="datetime-local" value="{{ default_schedule_value }}"></div>
-          <button class="btn btn-primary" style="margin-top:12px;" onclick="createSchedule(event)" {% if not existing_profile_available %}disabled{% endif %}>この内容で予約する</button>
+      <div style="padding:10px 20px;border-bottom:1px solid var(--border);">
+        <button onclick="addThreadItem()" style="background:none;border:1px solid var(--border);color:var(--accent);border-radius:999px;padding:7px 16px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          返信を追加
+        </button>
+      </div>
+
+      <!-- Actions toolbar -->
+      <div class="compose-actions">
+        <label class="compose-btn" title="画像・動画を追加">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
+          <input id="media-input" type="file" accept="image/*,video/*" multiple style="display:none">
+        </label>
+        <button class="compose-btn" title="動画コンパイラから選ぶ" onclick="openCompilerPicker(event)" {% if not video_compiler_available %}disabled{% endif %}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23,7 16,12 23,17"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+        </button>
+        <button class="compose-btn" title="メディアを外す" onclick="clearMedia()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6"/><path d="M19,6l-1,14H6L5,6"/><path d="M10,11v6M14,11v6"/><path d="M9,6V4h6v2"/></svg>
+        </button>
+        <button class="compose-btn" title="返信先を設定" onclick="toggleReplyBar()" id="reply-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9,17 4,12 9,7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+        </button>
+        <div style="margin-left:auto;font-size:12px;color:var(--text3);" id="media-label">{{ state.media_summary or "" }}</div>
+      </div>
+
+      <!-- Drop zone -->
+      <div class="drop-hint" id="drop-zone">
+        ここにファイルをドロップ、またはクリックして選択
+      </div>
+      <div id="compiler-picker"></div>
+
+      <!-- Footer: char count + post button -->
+      <div class="compose-footer">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="autosave" id="autosave">下書き自動保存</span>
         </div>
-        <div class="list">
-          {% if schedules %}
-            {% for item in schedules %}
-              <div class="item">
-                <div class="row space"><strong>{{ item.scheduled_at_display }}</strong><span class="pill {% if item.status == 'completed' %}ok{% elif item.status == 'failed' or item.status == 'canceled' %}ng{% elif item.status == 'running' %}run{% else %}wait{% endif %}">{{ item.status_label }}</span></div>
-                <div class="muted" style="margin-top:8px;">本文</div><div style="white-space:pre-wrap; margin-top:4px;">{{ item.content_preview }}</div>
-                <div class="muted" style="margin-top:8px;">メディア</div><div style="margin-top:4px;">{{ item.media_filename or "なし" }}</div>
-                {% if item.result_message or item.last_error %}<div class="muted" style="margin-top:8px;">結果</div><div style="white-space:pre-wrap; margin-top:4px;">{{ item.result_message or item.last_error }}</div>{% endif %}
-                <div class="row space" style="margin-top:12px;"><div class="muted">作成: {{ item.created_at_display }}</div><button class="btn btn-danger" onclick="deleteSchedule('{{ item.id }}')">削除</button></div>
-              </div>
-            {% endfor %}
-          {% else %}
-            <div class="item muted">まだ予約はありません。</div>
-          {% endif %}
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div class="char-ring" id="char-ring" title="">
+            <svg width="30" height="30" viewBox="0 0 30 30">
+              <circle class="ring-bg" cx="15" cy="15" r="12"/>
+              <circle class="ring-fill" id="ring-fill" cx="15" cy="15" r="12" stroke-dasharray="75.4" stroke-dashoffset="75.4"/>
+            </svg>
+            <div class="ring-num" id="ring-num"></div>
+          </div>
+          <button class="open-btn" onclick="openX(event)" {% if not existing_profile_available %}disabled{% endif %}>下書き</button>
+          <div class="post-btn-group">
+            <button class="post-btn" id="post-btn" onclick="postNow(event)" {% if not existing_profile_available %}disabled{% endif %}>
+              投稿する
+            </button>
+            <button class="post-btn sched-toggle-btn" id="sched-toggle-btn" onclick="toggleSchedulePicker()" {% if not existing_profile_available %}disabled{% endif %} title="予約投稿">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6,9 12,15 18,9"/></svg>
+            </button>
+          </div>
         </div>
       </div>
+
+      <!-- インライン予約ピッカー -->
+      <div id="inline-schedule-picker" style="display:none;padding:14px 20px;border-bottom:1px solid var(--border);background:rgba(29,155,240,.04);">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <input id="inline-schedule-at" type="datetime-local" value="{{ default_schedule_value }}"
+            style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;font-size:13px;color:var(--text);outline:none;flex:1;min-width:180px;">
+          <button class="post-btn" style="font-size:13px;padding:7px 16px;" onclick="createScheduleInline(event)" {% if not existing_profile_available %}disabled{% endif %}>
+            予約する
+          </button>
+          <button onclick="toggleSchedulePicker()" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:18px;line-height:1;padding:0 4px;">×</button>
+        </div>
+      </div>
+
+      <div class="hint-bar">⌨️ Ctrl+Enter で投稿 — 予約投稿はこのアプリが起動中のみ実行されます。</div>
     </div>
 
-    <div class="card editor-shell">
-      <div class="editor-head">
-        <div>
-          <h2>動画編集</h2>
-          <p class="sub">この画面の中で `hf-video-compiler` を開き、作成した動画や画像をそのまま下書きへ戻せます。</p>
+    <!-- ── Schedule panel ── -->
+    <div class="panel" id="panel-schedule">
+      <div class="section">
+        <div class="section-title">新しい予約</div>
+        <div class="schedule-form">
+          <label class="label-text" for="schedule-at">予約日時</label>
+          <input id="schedule-at" type="datetime-local" value="{{ default_schedule_value }}">
+          <div style="font-size:12px;color:var(--text2);margin-top:8px;">現在の本文・メディアをこの時刻に投稿します。</div>
+          <button class="sched-btn" onclick="createSchedule(event)" {% if not existing_profile_available %}disabled{% endif %}>予約する</button>
         </div>
-        <div class="editor-actions">
-          <span class="badge">{{ "動画編集 利用可" if video_compiler_available else "動画編集 未検出" }}</span>
-          <span class="badge">{{ "編集中ツール 起動中" if video_compiler_running else "編集中ツール 停止中" }}</span>
-          <button class="btn btn-secondary" onclick="startVideoEditor(event)" {% if not video_compiler_available %}disabled{% endif %}>動画編集を起動</button>
-          <button class="btn btn-secondary" onclick="openVideoEditor()" {% if not video_compiler_available %}disabled{% endif %}>別タブで開く</button>
-          <button class="btn btn-secondary" onclick="reloadVideoEditor()" {% if not video_compiler_available %}disabled{% endif %}>再読み込み</button>
-        </div>
+
+        <div class="section-title">予約一覧</div>
       </div>
-      {% if video_compiler_available %}
-        <div class="hint">動画を作ったら、編集ツール側の `X連携` から `動画をX下書きへ送る` を押してください。上の投稿欄へ自動で戻せます。</div>
-        <iframe id="video-editor-frame" class="editor-frame" src="{{ video_compiler_url }}"></iframe>
+      {% if schedules %}
+        {% for item in schedules %}
+          <div class="sched-item">
+            <div class="sched-top">
+              <span class="sched-time">{{ item.scheduled_at_display }}</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span class="pill {% if item.status == 'completed' %}ok{% elif item.status == 'failed' or item.status == 'canceled' %}ng{% elif item.status == 'running' %}run{% else %}wait{% endif %}">
+                  {% if item.status == 'running' %}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;animation:spin .8s linear infinite;margin-right:2px;"></span>{% endif %}
+                  {{ item.status_label }}
+                </span>
+                <button class="del-btn" onclick="deleteSchedule('{{ item.id }}')">削除</button>
+              </div>
+            </div>
+            <div class="sched-content">{{ item.content_preview or "（本文なし）" }}</div>
+            <div class="sched-meta">
+              {% if item.media_filename %}<span style="font-size:12px;color:var(--text3);">📎 {{ item.media_filename }}</span>{% endif %}
+              <span style="font-size:12px;color:var(--text3);">作成: {{ item.created_at_display }}</span>
+              {% if item.result_message or item.last_error %}<span style="font-size:12px;color:var(--text3);">{{ item.result_message or item.last_error }}</span>{% endif %}
+            </div>
+          </div>
+        {% endfor %}
       {% else %}
-        <div class="hint">`hf-video-compiler` フォルダが見つからないため、動画編集を表示できません。</div>
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <p>予約はまだありません</p>
+        </div>
       {% endif %}
     </div>
 
-    <div class="grid" style="margin-top:16px; display:none;" id="follow-review-section">
-      <div class="card">
-        <h2>レビュー付きフォロー支援</h2>
-        <p class="sub">自動フォローはせず、候補の抽選と記録だけを行います。候補は `@handle, 42, メモ` の形式で追加してください。</p>
-        <div class="box">
-          <div class="field" style="margin-top:0;">
-            <label for="follow-import">候補の一括追加</label>
-            <textarea id="follow-import" placeholder="@sample_account, 42, AI関連&#10;another_user, 18, video creator" style="min-height:160px;"></textarea>
-          </div>
-          <div class="row" style="margin-top:12px;">
-            <button class="btn btn-secondary" onclick="importFollowCandidates(event)">候補を追加</button>
-            <button class="btn btn-primary" onclick="pickFollowCandidate(event)">ランダムに1件選ぶ</button>
-          </div>
+    <!-- ── Video panel ── -->
+    <div class="panel" id="panel-video">
+      <div class="video-panel-head">
+        <div>
+          <div style="font-size:16px;font-weight:700;">動画編集ツール</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px;">hf-video-compiler と連携 · 「X連携」→「動画をX下書きへ送る」で自動反映</div>
         </div>
-        <div class="hint">この画面をフォローに使う Chrome プロフィールで開いてください。プロフィールは新しいタブで開くだけで、フォロー操作は X 上で手動です。</div>
-        {% if follow.current_candidate %}
-          <div class="item" style="margin-top:12px;">
-            <div class="row space">
-              <strong>@{{ follow.current_candidate.handle }}</strong>
-              <span class="pill wait">{{ follow.current_candidate.status_label }}</span>
-            </div>
-            <div class="muted" style="margin-top:8px;">フォロワー数</div>
-            <div style="margin-top:4px;">{{ follow.current_candidate.follower_count }}</div>
-            <div class="muted" style="margin-top:8px;">メモ</div>
-            <div style="white-space:pre-wrap; margin-top:4px;">{{ follow.current_candidate.note or "なし" }}</div>
-            <div class="muted" style="margin-top:8px;">追加日時</div>
-            <div style="margin-top:4px;">{{ follow.current_candidate.created_at_display }}</div>
-            {% if follow.current_candidate.opened_at_display %}
-              <div class="muted" style="margin-top:8px;">最後に開いた日時</div>
-              <div style="margin-top:4px;">{{ follow.current_candidate.opened_at_display }}</div>
-            {% endif %}
-            <div class="row" style="margin-top:12px;">
-              <button class="btn btn-secondary" onclick="openFollowCandidate(event, '{{ follow.current_candidate.id }}', '{{ follow.current_candidate.profile_url }}')">Xプロフィールを開く</button>
-              <button class="btn btn-primary" onclick="markFollowed(event, '{{ follow.current_candidate.id }}')">フォロー済みにする</button>
-              <button class="btn btn-danger" onclick="skipFollowCandidate(event, '{{ follow.current_candidate.id }}')">スキップ</button>
-            </div>
-          </div>
-        {% else %}
-          <div class="item muted" style="margin-top:12px;">レビュー中の候補はありません。候補を追加してからランダム抽選してください。</div>
-        {% endif %}
-        <div id="follow-status" class="status" data-shared-status="1"></div>
+        <div class="video-actions">
+          <button class="v-btn" onclick="startVideoEditor(event)" {% if not video_compiler_available %}disabled{% endif %}>起動</button>
+          <button class="v-btn" onclick="openVideoEditor()">別タブ</button>
+          <button class="v-btn" onclick="reloadVideoEditor()">再読込</button>
+        </div>
       </div>
-
-      <div class="card">
-        <h2>ペース管理</h2>
-        <p class="sub">安全側の固定上限です。日次 {{ follow.rate.daily_limit }} 件、{{ follow.rate.window_minutes }} 分で {{ follow.rate.window_limit }} 件、フォロー記録ごとに {{ follow.rate.cooldown_seconds }} 秒クールダウンします。</p>
-        <div class="summary" style="margin-top:12px;">
-          <div class="metric"><div class="label">本日</div><div class="value">{{ follow.rate.daily_count }} / {{ follow.rate.daily_limit }}</div></div>
-          <div class="metric"><div class="label">{{ follow.rate.window_minutes }}分</div><div class="value">{{ follow.rate.window_count }} / {{ follow.rate.window_limit }}</div></div>
-          <div class="metric"><div class="label">次に記録できる時刻</div><div class="value">{{ follow.rate.next_available_display }}</div></div>
-          <div class="metric"><div class="label">待機中候補</div><div class="value">{{ follow.pending_count }}</div></div>
+      {% if video_compiler_available %}
+        <iframe id="video-editor-frame" class="editor-frame" src="{{ video_compiler_url }}"></iframe>
+      {% else %}
+        <div class="empty-state" style="padding-top:80px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="23,7 16,12 23,17"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          <p>hf-video-compiler フォルダが見つかりません</p>
         </div>
-        <div class="hint" style="margin-top:12px;">{% if follow.rate.available %}今はフォロー済み記録が可能です。{% else %}現在は {{ follow.rate.waiting_reason }} のため待機中です。次に記録できる時刻: {{ follow.rate.next_available_display }}{% endif %}</div>
+      {% endif %}
+    </div>
 
-        <div class="list">
-          <div class="item">
-            <div class="row space"><strong>待機中の候補</strong><span class="pill wait">{{ follow.pending_count }} 件</span></div>
-            {% if follow.pending_candidates %}
-              {% for item in follow.pending_candidates %}
-                <div class="row space" style="margin-top:10px;">
-                  <div>@{{ item.handle }} / {{ item.follower_count }}</div>
-                  <div class="muted">{{ item.created_at_display }}</div>
-                </div>
-              {% endfor %}
-            {% else %}
-              <div class="muted" style="margin-top:10px;">待機中の候補はありません。</div>
-            {% endif %}
-          </div>
-
-          <div class="item">
-            <div class="row space">
-              <strong>最近の判定</strong>
-              <span class="pill ok">フォロー済み {{ follow.followed_count }}</span>
-            </div>
-            <div class="muted" style="margin-top:8px;">スキップ {{ follow.skipped_count }}</div>
-            {% if follow.recent_actions %}
-              {% for action in follow.recent_actions %}
-                <div style="margin-top:10px;">
-                  <div><strong>{{ action.action_label }}</strong> / @{{ action.handle }}</div>
-                  <div class="muted" style="margin-top:2px;">{{ action.time_display }}</div>
-                </div>
-              {% endfor %}
-            {% else %}
-              <div class="muted" style="margin-top:10px;">まだ判定ログはありません。</div>
-            {% endif %}
-          </div>
+    <!-- ── Templates panel ── -->
+    <div class="panel" id="panel-templates">
+      <div class="section">
+        <div class="section-title">新しいテンプレート</div>
+        <div class="schedule-form">
+          <label class="label-text" for="tpl-name">テンプレート名</label>
+          <input id="tpl-name" type="text" placeholder="例: 定期告知文" style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:14px;color:var(--text);outline:none;margin-bottom:10px;">
+          <label class="label-text" for="tpl-content">本文</label>
+          <textarea id="tpl-content" placeholder="テンプレートの本文を入力..." style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-size:14px;color:var(--text);min-height:120px;resize:vertical;font-family:inherit;outline:none;line-height:1.6;"></textarea>
+          <button class="sched-btn" onclick="saveTemplate(event)" style="margin-top:12px;">テンプレートを保存</button>
+        </div>
+        <div class="section-title">保存済みテンプレート</div>
+      </div>
+      <div id="template-list">
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 10h16M4 14h8"/></svg>
+          <p>テンプレートはまだありません</p>
         </div>
       </div>
     </div>
 
-    <div class="card" style="margin-top:16px;">
-      <h2>最近のログ</h2>
-      <div class="list">
-        {% if logs %}
-          {% for log in logs %}
-            <div class="item">
-              <div class="row space"><strong>{{ log.time }}</strong><span class="pill {{ 'ok' if log.success else 'ng' }}">{{ '成功' if log.success else '失敗' }}</span></div>
-              <div class="muted" style="margin-top:8px;">種類</div><div style="margin-top:4px;">{{ log.source or "手動" }}</div>
-              <div class="muted" style="margin-top:8px;">本文</div><div style="white-space:pre-wrap; margin-top:4px;">{{ log.content or "なし" }}</div>
-              <div class="muted" style="margin-top:8px;">メディア</div><div style="margin-top:4px;">{{ log.media_filename or "なし" }}</div>
-              <div class="muted" style="margin-top:8px;">結果</div><div style="white-space:pre-wrap; margin-top:4px;">{{ log.message }}</div>
+    <!-- ── Log panel ── -->
+    <div class="panel" id="panel-log">
+      {% if logs %}
+        {% for log in logs %}
+          <div class="log-item">
+            <div class="log-top">
+              <span class="pill {{ 'ok' if log.success else 'ng' }}">{{ '✓ 成功' if log.success else '✕ 失敗' }}</span>
+              <span style="font-size:13px;font-weight:600;margin-left:4px;">{{ log.time }}</span>
+              <span style="font-size:12px;color:var(--text3);margin-left:6px;">{{ log.source or "手動" }}</span>
             </div>
-          {% endfor %}
-        {% else %}
-          <div class="item muted">まだログはありません。</div>
-        {% endif %}
-      </div>
+            <div class="log-content">{{ log.content or "（本文なし）" }}</div>
+            <div class="log-meta">
+              {% if log.media_filename %}📎 {{ log.media_filename }} · {% endif %}{{ log.message }}
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/></svg>
+          <p>まだログはありません</p>
+        </div>
+      {% endif %}
     </div>
-  </div>
+
+    <!-- hidden follow section preserved -->
+    <div style="display:none;" id="follow-review-section">
+      <div id="follow-import-wrap">
+        <textarea id="follow-import"></textarea>
+      </div>
+      <div id="follow-status" class="status" data-shared-status="1"></div>
+    </div>
+    <div id="status" class="status" data-shared-status="1" style="display:none;"></div>
+
+  </main>
+</div>
   <script>
+    // ── Elements ──
     const contentEl = document.getElementById('content');
     const scheduleAtEl = document.getElementById('schedule-at');
     const followImportEl = document.getElementById('follow-import');
     const autosaveEl = document.getElementById('autosave');
-    const charCountEl = document.getElementById('char-count');
     const mediaLabelEl = document.getElementById('media-label');
     const mediaNameEl = document.getElementById('media-name');
     const previewAreaEl = document.getElementById('preview-area');
     const mediaInputEl = document.getElementById('media-input');
     const videoEditorFrameEl = document.getElementById('video-editor-frame');
+    const ringFill = document.getElementById('ring-fill');
+    const ringNum = document.getElementById('ring-num');
+    const dropZone = document.getElementById('drop-zone');
+    const compilerPickerEl = document.getElementById('compiler-picker');
+    const replyBarEl = document.getElementById('reply-bar');
+    const replyUrlEl = document.getElementById('reply-to-url');
+    const replyBtnEl = document.getElementById('reply-btn');
     const initialMediaItems = {{ state.media_items|tojson }};
+    const MAX_CHARS = 280;
+    const CIRC = 75.4;
     let saveTimer = null;
-    function updateCharCount(){ charCountEl.textContent = contentEl.value.length; }
-    function showStatus(message, type){ document.querySelectorAll('[data-shared-status="1"]').forEach((el)=>{ el.textContent=message; el.className='status '+type; }); }
-    async function saveDraft(){ const r = await fetch('/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value})}); const d = await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'下書きの保存に失敗しました。'); autosaveEl.textContent='下書きは自動保存されます。'; }
-    function queueDraftSave(){ autosaveEl.textContent='下書きを保存中...'; clearTimeout(saveTimer); saveTimer=setTimeout(async()=>{ try{ await saveDraft(); } catch(error){ autosaveEl.textContent=error.message; } }, 500); }
-    function renderPreview(url,isVideo){ previewAreaEl.innerHTML=''; if(!url)return; const box=document.createElement('div'); box.className='preview'; if(isVideo){ const v=document.createElement('video'); v.src=url; v.controls=true; box.appendChild(v);} else { const i=document.createElement('img'); i.src=url; i.alt='preview'; box.appendChild(i);} previewAreaEl.appendChild(box); }
-    async function uploadMedia(input){ const file=input.files[0]; if(!file)return; showStatus('メディアをアップロードしています...','info'); const form=new FormData(); form.append('file',file); try{ const r=await fetch('/upload',{method:'POST',body:form}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'メディアのアップロードに失敗しました。'); mediaLabelEl.textContent=d.filename; mediaNameEl.textContent=d.filename; renderPreview(URL.createObjectURL(file), file.type.startsWith('video/')); showStatus(d.message,'ok'); } catch(error){ showStatus(error.message,'err'); } finally { input.value=''; } }
-    async function clearMedia(){ try{ const r=await fetch('/media/clear',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'メディアの削除に失敗しました。'); mediaLabelEl.textContent='なし'; mediaNameEl.textContent='未選択'; renderPreview('', false); showStatus(d.message,'ok'); } catch(error){ showStatus(error.message,'err'); } }
-    async function withButton(button, fn){ button.disabled=true; try{ await fn(); } finally { button.disabled=false; } }
-    async function openX(event){ await withButton(event.currentTarget, async()=>{ showStatus('既存Chromeで投稿画面を開いています...','info'); await saveDraft(); const r=await fetch('/open-x',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'投稿画面を開けませんでした。'); showStatus(d.message,'ok'); }); }
-    async function postNow(event){ if(!confirm('既存Chromeでそのまま投稿します。続けますか。')) return; await withButton(event.currentTarget, async()=>{ showStatus('今すぐ投稿しています。Chrome が再起動することがあります...','info'); await saveDraft(); const r=await fetch('/post',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'投稿に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),1200); }); }
-    async function createSchedule(event){ await withButton(event.currentTarget, async()=>{ showStatus('予約を保存しています...','info'); await saveDraft(); const r=await fetch('/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value, scheduled_at:scheduleAtEl.value})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'予約投稿の作成に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),800); }); }
-    async function deleteSchedule(id){ if(!confirm('この予約を削除しますか。')) return; try{ const r=await fetch(`/schedule/${id}/delete`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'予約の削除に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),500); } catch(error){ showStatus(error.message,'err'); } }
-    async function startVideoEditor(event){ await withButton(event.currentTarget, async()=>{ showStatus('動画編集ツールを起動しています...','info'); const r=await fetch('/video-editor/start',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'動画編集ツールを起動できませんでした。'); showStatus(d.message,'ok'); if(videoEditorFrameEl){ videoEditorFrameEl.src='{{ video_compiler_url }}?ts='+Date.now(); } setTimeout(()=>location.reload(),800); }); }
+
+    // ── Toast ──
+    function toast(message, type='info', duration=4000){
+      const wrap = document.getElementById('toast-wrap');
+      const el = document.createElement('div');
+      el.className = `toast ${type}`;
+      const icons = {ok:'✓',err:'✕',info:'ℹ'};
+      el.innerHTML = `<span style="font-size:16px;">${icons[type]||'ℹ'}</span><span>${message}</span>`;
+      wrap.appendChild(el);
+      setTimeout(()=>{ el.classList.add('out'); setTimeout(()=>el.remove(), 200); }, duration);
+    }
+    function showStatus(message, type){ toast(message, type); }
+
+    // ── Tab switching ──
+    const TAB_TITLES = {compose:'投稿', schedule:'予約管理', video:'動画編集', templates:'テンプレート', log:'ログ'};
+    function switchTab(name){
+      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+      document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+      const panel = document.getElementById('panel-'+name);
+      if(panel) panel.classList.add('active');
+      document.querySelectorAll('.nav-item').forEach(n=>{
+        if(n.getAttribute('onclick')?.includes(`'${name}'`)) n.classList.add('active');
+      });
+      const titleEl = document.getElementById('page-title');
+      if(titleEl) titleEl.textContent = TAB_TITLES[name]||name;
+    }
+
+    // ── Char counter ──
+    function updateCharCount(){
+      const len = contentEl.value.length;
+      const ratio = Math.min(len / MAX_CHARS, 1);
+      const offset = CIRC - ratio * CIRC;
+      if(ringFill){ ringFill.style.strokeDashoffset = offset; }
+      const remaining = MAX_CHARS - len;
+      if(ringNum){
+        if(len === 0){ ringNum.textContent=''; }
+        else if(remaining <= 20){ ringNum.textContent = remaining; ringNum.style.color = remaining < 0 ? 'var(--red)' : 'var(--orange)'; }
+        else { ringNum.textContent=''; }
+      }
+      if(ringFill){
+        if(remaining < 0){ ringFill.style.stroke='var(--red)'; }
+        else if(remaining <= 20){ ringFill.style.stroke='var(--orange)'; }
+        else { ringFill.style.stroke='var(--accent)'; }
+      }
+    }
+
+    // ── Draft save ──
+    async function saveDraft(){
+      const r = await fetch('/draft',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value})});
+      const d = await r.json();
+      if(!r.ok||!d.ok) throw new Error(d.error||'下書きの保存に失敗しました。');
+      if(autosaveEl) autosaveEl.textContent = '保存済み ✓';
+    }
+    function queueDraftSave(){
+      if(autosaveEl) autosaveEl.textContent = '保存中...';
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(async()=>{
+        try{ await saveDraft(); } catch(e){ if(autosaveEl) autosaveEl.textContent = '保存失敗'; }
+      }, 600);
+    }
+
+    // ── Button with spinner ──
+    async function withButton(button, fn){
+      const orig = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = '<span class="spinner'+(button.classList.contains('post-btn')?' dark':'')+'"></span>';
+      try{ await fn(); } finally { button.disabled=false; button.innerHTML=orig; }
+    }
+
+    // ── Media ──
+    function mediaRoute(i){ return `/media-items/${i}`; }
+    function mediaLabelText(items){
+      if(!items.length) return '';
+      const names = items.map(i=>i.filename);
+      if(names.length===1) return names[0];
+      return names.length>3 ? `${names.slice(0,3).join(' / ')} ほか${names.length-3}件` : names.join(' / ');
+    }
+    function renderPreviewItems(items){
+      previewAreaEl.innerHTML='';
+      if(!items.length) return;
+      const grid = document.createElement('div');
+      grid.className = `compose-media-preview count-${Math.min(items.length,4)}`;
+      items.slice(0,4).forEach((item,i)=>{
+        const media = item.is_video ? document.createElement('video') : document.createElement('img');
+        media.src = item.url;
+        if(item.is_video){ media.controls=true; media.playsInline=true; }
+        else { media.alt=item.filename||''; }
+        grid.appendChild(media);
+      });
+      previewAreaEl.appendChild(grid);
+    }
+    function applyMediaSummary(items){
+      const label = mediaLabelText(items);
+      if(mediaLabelEl) mediaLabelEl.textContent = label;
+      if(mediaNameEl) mediaNameEl.textContent = label || '未選択';
+    }
+    async function uploadFiles(files){
+      if(!files.length) return;
+      toast('メディアをアップロードしています...','info',8000);
+      const form = new FormData();
+      files.forEach(f=>form.append('files',f));
+      try{
+        const r = await fetch('/media-items/upload',{method:'POST',body:form});
+        const d = await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'アップロードに失敗しました。');
+        applyMediaSummary(files.map(f=>({filename:f.name})));
+        renderPreviewItems(files.map(f=>({filename:f.name,is_video:f.type.startsWith('video/'),url:URL.createObjectURL(f)})));
+        toast(d.message,'ok');
+      } catch(e){ toast(e.message,'err'); }
+    }
+    async function clearMedia(){
+      try{
+        const r = await fetch('/media/clear',{method:'POST'});
+        const d = await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'メディアの削除に失敗しました。');
+        applyMediaSummary([]); renderPreviewItems([]);
+        toast(d.message,'ok');
+      } catch(e){ toast(e.message,'err'); }
+    }
+
+    // ── Drop zone ──
+    if(dropZone){
+      dropZone.addEventListener('click',()=>mediaInputEl?.click());
+      dropZone.addEventListener('dragover',e=>{ e.preventDefault(); dropZone.classList.add('dragover'); });
+      dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('dragover'));
+      dropZone.addEventListener('drop',e=>{ e.preventDefault(); dropZone.classList.remove('dragover'); uploadFiles([...e.dataTransfer.files]); });
+    }
+    if(mediaInputEl){ mediaInputEl.multiple=true; mediaInputEl.onchange=()=>uploadFiles([...mediaInputEl.files]); }
+
+    // ── Keyboard shortcut ──
+    document.addEventListener('keydown',e=>{
+      if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); document.getElementById('post-btn')?.click(); }
+    });
+
+    // ── Actions ──
+    async function openX(event){
+      await withButton(event.currentTarget, async()=>{
+        toast('投稿画面を開いています...','info');
+        await saveDraft();
+        const r=await fetch('/open-x',{method:'POST'});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'投稿画面を開けませんでした。');
+        toast(d.message,'ok');
+      });
+    }
+    // ── Thread composer ──
+    let threadCount = 1;
+    const MAX_THREAD = 25;
+
+    function getThreadTexts(){
+      return [...document.querySelectorAll('#thread-composer textarea')].map(el=>el.value);
+    }
+
+    function updateThreadCharCount(textarea){
+      const idx = textarea.closest('.thread-item')?.dataset.index;
+      const countEl = document.getElementById(`char-count-${idx}`);
+      if(!countEl) return;
+      const len = textarea.value.length;
+      const rem = 280 - len;
+      countEl.textContent = rem <= 20 ? `残り ${rem}` : `${len} / 280`;
+      countEl.className = 'thread-char-count' + (rem < 0 ? ' over' : rem <= 20 ? ' warn' : '');
+    }
+
+    function addThreadItem(){
+      if(threadCount >= MAX_THREAD){ toast(`スレッドは最大${MAX_THREAD}件です。`,'err'); return; }
+      const idx = threadCount++;
+      const composer = document.getElementById('thread-composer');
+      const item = document.createElement('div');
+      item.className = 'thread-item';
+      item.dataset.index = idx;
+      item.innerHTML = `
+        <div class="thread-left">
+          <div class="avatar" style="font-size:13px;">${idx+1}</div>
+          <div class="thread-line"></div>
+        </div>
+        <div class="thread-right">
+          <textarea class="compose-textarea" id="content-${idx}" placeholder="続きを書く..." rows="3" style="min-height:80px;"></textarea>
+          <div class="thread-item-meta">
+            <span class="thread-label">返信 ${idx}</span>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="thread-char-count" id="char-count-${idx}">0 / 280</span>
+              <button class="thread-del-btn" onclick="removeThreadItem(this)" title="削除">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>`;
+      item.querySelector('textarea').addEventListener('input', e=>updateThreadCharCount(e.target));
+      composer.appendChild(item);
+      item.querySelector('textarea').focus();
+      // 前の item の thread-line を表示
+      composer.querySelectorAll('.thread-line').forEach((l,i,arr)=>{ l.style.display = i < arr.length-1 ? 'block' : 'none'; });
+      // 最初のアイテムのlineを表示
+      updateThreadLines();
+    }
+
+    function removeThreadItem(btn){
+      const item = btn.closest('.thread-item');
+      item.remove();
+      threadCount--;
+      updateThreadLines();
+    }
+
+    function updateThreadLines(){
+      const items = document.querySelectorAll('#thread-composer .thread-item');
+      items.forEach((item, i)=>{
+        const line = item.querySelector('.thread-line');
+        if(line) line.style.display = i < items.length-1 ? 'block' : 'none';
+      });
+    }
+
+    // 本投稿のchar count
+    contentEl.addEventListener('input', e=>{ updateCharCount(); updateThreadCharCount(e.target); queueDraftSave(); });
+
+    // ── Reply ──
+    function toggleReplyBar(){
+      const showing = replyBarEl.style.display !== 'none' && replyBarEl.style.display !== '';
+      replyBarEl.style.display = showing ? 'none' : 'flex';
+      if(!showing){ replyUrlEl?.focus(); }
+      if(replyBtnEl) replyBtnEl.style.color = showing ? '' : 'var(--accent)';
+    }
+    function clearReply(){
+      if(replyUrlEl) replyUrlEl.value='';
+      if(replyBarEl) replyBarEl.style.display='none';
+      if(replyBtnEl) replyBtnEl.style.color='';
+    }
+
+    // ── Templates ──
+    async function loadTemplates(){
+      try{
+        const r=await fetch('/templates');
+        const d=await r.json();
+        renderTemplateList(d.templates||[]);
+      } catch(e){ console.error(e); }
+    }
+    function renderTemplateList(templates){
+      const listEl=document.getElementById('template-list');
+      if(!listEl) return;
+      if(!templates.length){
+        listEl.innerHTML='<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 10h16M4 14h8"/></svg><p>テンプレートはまだありません</p></div>';
+        return;
+      }
+      listEl.innerHTML='';
+      templates.forEach(tpl=>{
+        const item=document.createElement('div');
+        item.className='tpl-item';
+        item.innerHTML=`<div class="tpl-body"><div class="tpl-name">${escHtml(tpl.name)}</div><div class="tpl-preview">${escHtml(tpl.content)}</div></div><div class="tpl-actions"><button class="tpl-use-btn">使う</button><button class="tpl-del-btn">削除</button></div>`;
+        item.querySelector('.tpl-use-btn').onclick=e=>{ e.stopPropagation(); applyTemplate(tpl); };
+        item.querySelector('.tpl-del-btn').onclick=e=>{ e.stopPropagation(); deleteTemplate(tpl.id); };
+        item.onclick=()=>applyTemplate(tpl);
+        listEl.appendChild(item);
+      });
+    }
+    function escHtml(s){ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+    function applyTemplate(tpl){
+      contentEl.value=tpl.content;
+      updateCharCount(); queueDraftSave();
+      switchTab('compose');
+      toast(`テンプレート「${tpl.name}」を適用しました。`,'ok');
+    }
+    async function saveTemplate(event){
+      await withButton(event.currentTarget, async()=>{
+        const name=(document.getElementById('tpl-name')?.value||'').trim();
+        const content=(document.getElementById('tpl-content')?.value||'').trim();
+        if(!name||!content) throw new Error('名前と本文を入力してください。');
+        const r=await fetch('/templates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,content})});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'保存に失敗しました。');
+        document.getElementById('tpl-name').value='';
+        document.getElementById('tpl-content').value='';
+        toast(d.message,'ok');
+        await loadTemplates();
+      });
+    }
+    async function deleteTemplate(id){
+      if(!confirm('このテンプレートを削除しますか？'))return;
+      const r=await fetch(`/templates/${id}/delete`,{method:'POST'});
+      const d=await r.json();
+      if(!r.ok||!d.ok){ toast(d.error||'削除に失敗しました。','err'); return; }
+      toast(d.message,'ok');
+      await loadTemplates();
+    }
+
+    async function postNow(event){
+      const texts = getThreadTexts();
+      const hasThread = texts.length > 1;
+      const label = hasThread ? `スレッド ${texts.length} 件を投稿` : '今すぐXに投稿';
+      if(!confirm(`${label}します。よろしいですか？`)) return;
+      await withButton(event.currentTarget, async()=>{
+        toast('投稿しています...','info',15000);
+        await saveDraft();
+        const replyTo = replyUrlEl?.value?.trim()||'';
+
+        if(hasThread){
+          const tweets = texts.map(text=>({text}));
+          const r=await fetch('/post-thread',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tweets})});
+          const d=await r.json();
+          if(!r.ok||!d.ok) throw new Error(d.error||'スレッド投稿に失敗しました。');
+          toast(d.message,'ok');
+        } else {
+          const r=await fetch('/post2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value, reply_to_url:replyTo})});
+          const d=await r.json();
+          if(!r.ok||!d.ok) throw new Error(d.error||'投稿に失敗しました。');
+          toast(d.message,'ok');
+        }
+        clearReply();
+        setTimeout(()=>location.reload(),1500);
+      });
+    }
+    function toggleSchedulePicker(){
+      const picker=document.getElementById('inline-schedule-picker');
+      if(!picker) return;
+      picker.style.display = picker.style.display==='none'||!picker.style.display ? 'block' : 'none';
+    }
+    async function createScheduleInline(event){
+      await withButton(event.currentTarget, async()=>{
+        toast('予約を保存しています...','info');
+        await saveDraft();
+        const at=document.getElementById('inline-schedule-at')?.value||'';
+        const r=await fetch('/schedule2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value, scheduled_at:at})});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'予約の保存に失敗しました。');
+        toast(d.message,'ok');
+        document.getElementById('inline-schedule-picker').style.display='none';
+        setTimeout(()=>location.reload(),800);
+      });
+    }
+    async function createSchedule(event){
+      await withButton(event.currentTarget, async()=>{
+        toast('予約を保存しています...','info');
+        await saveDraft();
+        const r=await fetch('/schedule2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value, scheduled_at:scheduleAtEl.value})});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'予約の保存に失敗しました。');
+        toast(d.message,'ok');
+        setTimeout(()=>location.reload(),800);
+      });
+    }
+    async function deleteSchedule(id){
+      if(!confirm('この予約を削除しますか？')) return;
+      try{
+        const r=await fetch(`/schedule/${id}/delete`,{method:'POST'});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'削除に失敗しました。');
+        toast(d.message,'ok');
+        setTimeout(()=>location.reload(),500);
+      } catch(e){ toast(e.message,'err'); }
+    }
+    async function startVideoEditor(event){
+      await withButton(event.currentTarget, async()=>{
+        toast('動画編集ツールを起動しています...','info');
+        const r=await fetch('/video-editor/start',{method:'POST'});
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'起動できませんでした。');
+        toast(d.message,'ok');
+        if(videoEditorFrameEl) videoEditorFrameEl.src='{{ video_compiler_url }}?ts='+Date.now();
+        setTimeout(()=>location.reload(),1000);
+      });
+    }
     function openVideoEditor(){ window.open('{{ video_compiler_url }}','_blank'); }
-    function reloadVideoEditor(){ if(videoEditorFrameEl){ videoEditorFrameEl.src='{{ video_compiler_url }}?ts='+Date.now(); } }
-    async function importFollowCandidates(event){ await withButton(event.currentTarget, async()=>{ const candidates=(followImportEl?.value||'').trim(); if(!candidates) throw new Error('追加する候補を入力してください。'); showStatus('フォロー候補を取り込んでいます...','info'); const r=await fetch('/follow/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidates})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'候補の追加に失敗しました。'); followImportEl.value=''; showStatus(d.message,'ok'); setTimeout(()=>location.reload(),700); }); }
-    async function pickFollowCandidate(event){ await withButton(event.currentTarget, async()=>{ showStatus('ランダム候補を選んでいます...','info'); const r=await fetch('/follow/pick',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'候補を選べませんでした。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
-    async function openFollowCandidate(event, id, url){ await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/open`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'プロフィールを開けませんでした。'); const tab=window.open(url,'_blank','noopener'); if(!tab){ window.location.href=url; } showStatus(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
-    async function markFollowed(event, id){ if(!confirm('X 上で手動フォローしたあとに記録します。続けますか。')) return; await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/followed`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'フォロー済みの記録に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
-    async function skipFollowCandidate(event, id){ if(!confirm('この候補をスキップしますか。')) return; await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/skip`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'スキップに失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
-    contentEl.addEventListener('input',()=>{ updateCharCount(); queueDraftSave(); }); updateCharCount();
-    function mediaRoute(index){ return `/media-items/${index}`; }
-    function mediaLabelText(items){ if(!items.length) return 'なし'; const names=items.map((item)=>item.filename); if(names.length===1) return names[0]; const preview=names.slice(0,3).join(' / '); return names.length>3 ? `${preview} ほか${names.length-3}件` : preview; }
-    function renderPreviewItems(items){ previewAreaEl.innerHTML=''; if(!items.length) return; const grid=document.createElement('div'); grid.className='list'; grid.style.display='grid'; grid.style.gridTemplateColumns='repeat(auto-fit,minmax(220px,1fr))'; grid.style.gap='10px'; items.forEach((item, index)=>{ const box=document.createElement('div'); box.className='preview'; box.style.position='relative'; box.style.padding='0'; box.style.background='#fff'; const media=item.is_video ? document.createElement('video') : document.createElement('img'); media.src=item.url; media.style.background='#f7f0e5'; media.style.minHeight='180px'; if(item.is_video){ media.controls=true; media.playsInline=true; } else { media.alt=item.filename||'preview'; } box.appendChild(media); const badge=document.createElement('div'); badge.className='badge'; badge.style.position='absolute'; badge.style.top='10px'; badge.style.left='10px'; badge.style.background='rgba(255,250,242,.92)'; badge.style.color='#244c72'; badge.textContent = item.is_video ? `動画 ${index+1}` : `画像 ${index+1}`; box.appendChild(badge); const caption=document.createElement('div'); caption.className='muted'; caption.style.padding='10px 12px'; caption.style.borderTop='1px solid #e8d8bf'; caption.textContent=item.filename||''; box.appendChild(caption); grid.appendChild(box); }); previewAreaEl.appendChild(grid); }
-    function applyMediaSummary(items){ const label=mediaLabelText(items); mediaLabelEl.textContent=label; mediaNameEl.textContent=label || '未選択'; }
-    async function uploadMediaFiles(input){ const files=[...(input.files||[])]; if(!files.length) return; showStatus('メディアをアップロードしています...','info'); const form=new FormData(); files.forEach((file)=>form.append('files', file)); try{ const r=await fetch('/media-items/upload',{method:'POST',body:form}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'メディアのアップロードに失敗しました。'); applyMediaSummary(files.map((file)=>({filename:file.name}))); renderPreviewItems(files.map((file)=>({filename:file.name,is_video:file.type.startsWith('video/'),url:URL.createObjectURL(file)}))); showStatus(d.message,'ok'); } catch(error){ showStatus(error.message,'err'); } finally { input.value=''; } }
-    async function clearMedia(){ try{ const r=await fetch('/media/clear',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'メディアの削除に失敗しました。'); applyMediaSummary([]); renderPreviewItems([]); showStatus(d.message,'ok'); } catch(error){ showStatus(error.message,'err'); } }
-    function ensureCompilerPicker(){ let picker=document.getElementById('compiler-picker'); if(!picker){ const controls=mediaInputEl?.closest('label')?.parentElement; if(controls){ const button=document.createElement('button'); button.className='btn btn-soft'; button.textContent='Fanzaコンパイラから反映'; button.onclick=(event)=>openCompilerPicker(event); controls.insertBefore(button, controls.lastElementChild); } picker=document.createElement('div'); picker.id='compiler-picker'; picker.className='box'; picker.style.marginTop='12px'; picker.style.display='none'; picker.innerHTML='<div class=\"row space\"><div><div class=\"label\">Fanzaコンパイラ素材</div><div class=\"muted\" id=\"compiler-assets-status\">最新の動画・画像を読み込みます。</div></div><button class=\"btn btn-secondary\" type=\"button\" id=\"compiler-assets-reload\">更新</button></div><div id=\"compiler-assets-list\" class=\"list\" style=\"margin-top:12px;\"></div>'; previewAreaEl.parentElement.appendChild(picker); picker.querySelector('#compiler-assets-reload').addEventListener('click',(event)=>loadCompilerAssets(event)); } return picker; }
-    async function downloadSelectedAssets(selected){ for(const asset of selected){ const a=document.createElement('a'); a.href=asset.media_url; a.download=asset.filename || 'media'; a.target='_blank'; document.body.appendChild(a); a.click(); a.remove(); await new Promise((resolve)=>setTimeout(resolve, 120)); } }
-    function renderCompilerAssets(items){ const picker=ensureCompilerPicker(); const list=picker.querySelector('#compiler-assets-list'); const status=picker.querySelector('#compiler-assets-status'); list.innerHTML=''; if(!items.length){ status.textContent='反映できる素材がまだありません。'; list.innerHTML='<div class=\"item muted\">先に Fanza コンパイラで動画や画像を作成してください。</div>'; return; } status.textContent='使いたい素材を選んで、ダウンロードするかこのツールへ反映してください。'; items.forEach((job)=>{ const card=document.createElement('div'); card.className='item'; card.innerHTML=`<div class=\"row space\"><strong>${job.timestamp||''}</strong><span class=\"pill wait\">${job.job_id}</span></div><div class=\"muted\" style=\"margin-top:8px;word-break:break-all;\">${job.fanza_url||''}</div><div class=\"list\" style=\"margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;\"></div><div class=\"row\" style=\"margin-top:12px;\"><button class=\"btn btn-secondary\" type=\"button\" data-role=\"download\">選択した素材をダウンロード</button><button class=\"btn btn-primary\" type=\"button\" data-role=\"import\">このツールに反映</button></div>`; const assetList=card.querySelector('.list'); const appendAsset=(asset)=>{ if(!asset) return; const row=document.createElement('label'); row.className='preview'; row.style.display='block'; row.style.cursor='pointer'; row.style.padding='0'; row.style.background='#fff'; const preview = asset.media_url && asset.filename && /\\.(mp4|mov|webm|avi|mkv)$/i.test(asset.filename) ? `<video src=\"${asset.media_url}\" muted playsinline preload=\"metadata\" style=\"width:100%;height:220px;object-fit:contain;display:block;background:#f7f0e5\"></video>` : `<img src=\"${asset.media_url}\" alt=\"${asset.filename}\" style=\"width:100%;height:220px;object-fit:contain;display:block;background:#f7f0e5\">`; row.innerHTML=`${preview}<div style=\"padding:10px 12px\"><div class=\"row space\"><strong style=\"font-size:13px\">${asset.label}</strong><input type=\"checkbox\"></div><div class=\"muted\" style=\"margin-top:6px;word-break:break-all;\">${asset.filename}</div></div>`; row.querySelector('input').dataset.asset=JSON.stringify(asset); assetList.appendChild(row); }; appendAsset(job.video); appendAsset(job.jacket); (job.thumbnails||[]).forEach((thumb)=>appendAsset(thumb)); const collectSelected=()=>[...card.querySelectorAll('input[type=\"checkbox\"]:checked')].map((input)=>JSON.parse(input.dataset.asset)); card.querySelector('[data-role=\"download\"]').addEventListener('click', async (event)=>{ const selected=collectSelected(); if(!selected.length){ showStatus('ダウンロードする素材を選んでください。','err'); return; } await withButton(event.currentTarget, async()=>{ showStatus('素材をダウンロードしています...','info'); await downloadSelectedAssets(selected); showStatus(`${selected.length}件の素材をダウンロードしました。`,'ok'); }); }); card.querySelector('[data-role=\"import\"]').addEventListener('click', async (event)=>{ const selected=collectSelected(); if(!selected.length){ showStatus('反映する素材を選んでください。','err'); return; } await withButton(event.currentTarget, async()=>{ showStatus('Fanzaコンパイラの素材を反映しています...','info'); const r=await fetch('/video-editor/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:selected})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'素材の反映に失敗しました。'); const imported=(d.items||[]).map((item, index)=>({filename:item.filename,is_video:item.is_video,url:mediaRoute(index)})); applyMediaSummary(d.items||[]); renderPreviewItems(imported); showStatus(d.message,'ok'); picker.style.display='none'; }); }); list.appendChild(card); }); }
-    async function loadCompilerAssets(event){ const picker=ensureCompilerPicker(); picker.style.display='block'; const reloadButton=event?.currentTarget; if(reloadButton){ reloadButton.disabled=true; } try{ showStatus('Fanzaコンパイラの素材を確認しています...','info'); const r=await fetch('/video-editor/assets'); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'素材一覧の取得に失敗しました。'); renderCompilerAssets(d.items||[]); showStatus('Fanzaコンパイラの素材を読み込みました。','ok'); } catch(error){ showStatus(error.message,'err'); } finally { if(reloadButton){ reloadButton.disabled=false; } } }
-    async function openCompilerPicker(event){ const picker=ensureCompilerPicker(); picker.style.display = picker.style.display === 'none' ? 'block' : 'none'; if(picker.style.display === 'block'){ await loadCompilerAssets(event); } }
-    async function postNow(event){ if(!confirm('既存Chromeでそのまま投稿します。続けますか。')) return; await withButton(event.currentTarget, async()=>{ showStatus('今すぐ投稿しています。Chrome が再起動することがあります...','info'); await saveDraft(); const r=await fetch('/post2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'投稿に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),1200); }); }
-    async function createSchedule(event){ await withButton(event.currentTarget, async()=>{ showStatus('予約を保存しています...','info'); await saveDraft(); const r=await fetch('/schedule2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:contentEl.value, scheduled_at:scheduleAtEl.value})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'予約投稿の保存に失敗しました。'); showStatus(d.message,'ok'); setTimeout(()=>location.reload(),800); }); }
-    function removeFollowUi(){ const importBox=document.getElementById('follow-import'); if(importBox){ const card=importBox.closest('.card'); if(card){ const grid=card.parentElement; const nextCard=card.nextElementSibling; card.remove(); if(nextCard && nextCard.classList.contains('card')){ nextCard.remove(); } if(grid && !grid.children.length){ grid.remove(); } } } }
-    if(mediaInputEl){ mediaInputEl.multiple = true; mediaInputEl.onchange = () => uploadMediaFiles(mediaInputEl); }
-    removeFollowUi();
-    ensureCompilerPicker();
+    function reloadVideoEditor(){ if(videoEditorFrameEl) videoEditorFrameEl.src='{{ video_compiler_url }}?ts='+Date.now(); }
+
+    // ── Compiler picker ──
+    function ensureCompilerPicker(){
+      const p = compilerPickerEl;
+      if(p && !p.dataset.ready){
+        p.dataset.ready='1';
+        p.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;"><span style="font-size:14px;font-weight:600;">コンパイラ素材</span><button class="v-btn" id="compiler-assets-reload" type="button">更新</button></div><div style="font-size:12px;color:var(--text2);margin-bottom:10px;" id="compiler-assets-status">読み込み中...</div><div id="compiler-assets-list" style="display:grid;gap:10px;"></div>`;
+        p.querySelector('#compiler-assets-reload').addEventListener('click',e=>loadCompilerAssets(e));
+      }
+      return p;
+    }
+    async function downloadSelectedAssets(selected){
+      for(const a of selected){ const el=document.createElement('a'); el.href=a.media_url; el.download=a.filename||'media'; document.body.appendChild(el); el.click(); el.remove(); await new Promise(r=>setTimeout(r,120)); }
+    }
+    function renderCompilerAssets(items){
+      const picker=ensureCompilerPicker();
+      const list=picker.querySelector('#compiler-assets-list');
+      const status=picker.querySelector('#compiler-assets-status');
+      list.innerHTML='';
+      if(!items.length){ status.textContent='素材がまだありません。'; return; }
+      status.textContent='使いたい素材を選んでください。';
+      items.forEach(job=>{
+        const card=document.createElement('div');
+        card.style.cssText='background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;';
+        card.innerHTML=`<div style="display:flex;justify-content:space-between;margin-bottom:8px;"><strong style="font-size:13px;">${job.timestamp||''}</strong><span class="pill wait">${job.job_id}</span></div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;" id="assets-${job.job_id}"></div><div style="display:flex;gap:8px;margin-top:10px;"><button class="v-btn" data-role="download">ダウンロード</button><button class="v-btn" style="background:var(--accent);color:#fff;border:none;" data-role="import">反映</button></div>`;
+        const assetList=card.querySelector(`#assets-${job.job_id}`);
+        const appendAsset=asset=>{ if(!asset)return; const row=document.createElement('label'); row.style.cssText='cursor:pointer;border-radius:8px;overflow:hidden;border:1px solid var(--border);display:block;'; const isVid=/\.(mp4|mov|webm|avi|mkv)$/i.test(asset.filename||''); row.innerHTML=`${isVid?`<video src="${asset.media_url}" muted preload="metadata" style="width:100%;height:120px;object-fit:cover;display:block;background:#111;"></video>`:`<img src="${asset.media_url}" style="width:100%;height:120px;object-fit:cover;display:block;background:#111;">`}<div style="padding:6px 8px;display:flex;justify-content:space-between;align-items:center;"><span style="font-size:11px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:80%;">${asset.label}</span><input type="checkbox"></div>`; row.querySelector('input').dataset.asset=JSON.stringify(asset); assetList.appendChild(row); };
+        appendAsset(job.video); appendAsset(job.jacket); (job.thumbnails||[]).forEach(t=>appendAsset(t));
+        const collectSelected=()=>[...card.querySelectorAll('input:checked')].map(i=>JSON.parse(i.dataset.asset));
+        card.querySelector('[data-role="download"]').onclick=async e=>{ const sel=collectSelected(); if(!sel.length){toast('素材を選んでください。','err');return;} await downloadSelectedAssets(sel); toast(`${sel.length}件をダウンロードしました。`,'ok'); };
+        card.querySelector('[data-role="import"]').onclick=async e=>{ const sel=collectSelected(); if(!sel.length){toast('素材を選んでください。','err');return;} toast('反映しています...','info'); const r=await fetch('/video-editor/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:sel})}); const d=await r.json(); if(!r.ok||!d.ok){toast(d.error||'失敗しました。','err');return;} const imported=(d.items||[]).map((item,i)=>({filename:item.filename,is_video:item.is_video,url:mediaRoute(i)})); applyMediaSummary(d.items||[]); renderPreviewItems(imported); toast(d.message,'ok'); if(compilerPickerEl) compilerPickerEl.style.display='none'; };
+        list.appendChild(card);
+      });
+    }
+    async function loadCompilerAssets(event){
+      const picker=ensureCompilerPicker();
+      if(picker) picker.style.display='block';
+      const btn=event?.currentTarget;
+      if(btn) btn.disabled=true;
+      try{
+        const r=await fetch('/video-editor/assets');
+        const d=await r.json();
+        if(!r.ok||!d.ok) throw new Error(d.error||'取得に失敗しました。');
+        renderCompilerAssets(d.items||[]);
+      } catch(e){ toast(e.message,'err'); }
+      finally { if(btn) btn.disabled=false; }
+    }
+    async function openCompilerPicker(event){
+      const picker=ensureCompilerPicker();
+      if(!picker) return;
+      if(picker.style.display==='none'||!picker.style.display){ await loadCompilerAssets(event); }
+      else { picker.style.display='none'; }
+    }
+
+    // ── Follow (hidden, preserved for API compat) ──
+    async function importFollowCandidates(event){ await withButton(event.currentTarget, async()=>{ const candidates=(followImportEl?.value||'').trim(); if(!candidates){toast('候補を入力してください。','err');return;} const r=await fetch('/follow/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidates})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'失敗しました。'); followImportEl.value=''; toast(d.message,'ok'); setTimeout(()=>location.reload(),700); }); }
+    async function pickFollowCandidate(event){ await withButton(event.currentTarget, async()=>{ const r=await fetch('/follow/pick',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'失敗しました。'); toast(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
+    async function openFollowCandidate(event,id,url){ await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/open`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'失敗しました。'); window.open(url,'_blank','noopener'); toast(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
+    async function markFollowed(event,id){ if(!confirm('フォロー済みとして記録しますか？'))return; await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/followed`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'失敗しました。'); toast(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
+    async function skipFollowCandidate(event,id){ if(!confirm('この候補をスキップしますか？'))return; await withButton(event.currentTarget, async()=>{ const r=await fetch(`/follow/candidate/${id}/skip`,{method:'POST'}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||'失敗しました。'); toast(d.message,'ok'); setTimeout(()=>location.reload(),500); }); }
+
+    // ── Init ──
+    updateCharCount();
+    updateThreadLines();
     applyMediaSummary(initialMediaItems||[]);
-    renderPreviewItems((initialMediaItems||[]).map((item, index)=>({filename:item.filename,is_video:item.is_video,url:mediaRoute(index)})));
+    renderPreviewItems((initialMediaItems||[]).map((item,i)=>({filename:item.filename,is_video:item.is_video,url:mediaRoute(i)})));
+    loadTemplates();
   </script>
 </body>
 </html>
@@ -1568,6 +2244,7 @@ def post_now_v2():
     payload = request.get_json() or {}
     state = get_state()
     content = (payload.get("content") or state.get("content") or "").strip()
+    reply_to_url = (payload.get("reply_to_url") or "").strip()
     media_items = normalize_media_items(state.get("media_items"), state.get("media_path", ""), state.get("media_filename", ""))
     if LOCAL_MODE:
         media_items = [item for item in media_items if Path(item.get("path", "")).exists()]
@@ -1576,7 +2253,7 @@ def post_now_v2():
     state["content"] = content
     set_state_media_items(state, media_items)
     save_state(state)
-    success, message = execute_post(content, media_items, media_summary(media_items), state.get("profile_handle", DEFAULT_PROFILE_HANDLE), "手動投稿")
+    success, message = execute_post(content, media_items, media_summary(media_items), state.get("profile_handle", DEFAULT_PROFILE_HANDLE), "手動投稿", reply_to_url=reply_to_url)
     if success:
         return jsonify({"ok": True, "message": message})
     return jsonify({"ok": False, "error": message}), 500
@@ -1831,6 +2508,79 @@ def delete_schedule(schedule_id: str):
         delete_media_file(item.get("path", ""))
     return jsonify({"ok": True, "message": "予約を削除しました。"})
 
+@app.route("/post-thread", methods=["POST"])
+def post_thread():
+    if not existing_profile_available():
+        return jsonify({"ok": False, "error": "既存Chrome投稿はローカルの Windows 環境でのみ使えます。"}), 400
+    payload = request.get_json() or {}
+    tweets = payload.get("tweets", [])
+    if not tweets:
+        return jsonify({"ok": False, "error": "ツイートが空です。"}), 400
+    if len(tweets) > 25:
+        return jsonify({"ok": False, "error": "スレッドは25件以内にしてください。"}), 400
+
+    import tempfile
+    thread_data = []
+    for tweet in tweets:
+        text = (tweet.get("text") or "").strip()
+        thread_data.append({"text": text, "media_paths": []})
+
+    if not any(t["text"] for t in thread_data):
+        return jsonify({"ok": False, "error": "本文が全て空です。"}), 400
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(thread_data, f, ensure_ascii=False)
+        thread_file = f.name
+
+    try:
+        with _posting_lock:
+            success, message = run_existing_profile_command(["--thread-json", thread_file])
+    finally:
+        try:
+            Path(thread_file).unlink()
+        except Exception:
+            pass
+
+    add_log(success, message, tweets[0].get("text", "")[:50] + f" (スレッド{len(tweets)}件)", "", "スレッド投稿")
+    if success:
+        state = get_state()
+        state["last_post_at"] = now_jst().strftime("%Y-%m-%d %H:%M:%S")
+        save_state(state)
+        return jsonify({"ok": True, "message": message})
+    return jsonify({"ok": False, "error": message}), 500
+
+
+@app.route("/templates", methods=["GET"])
+def list_templates():
+    return jsonify({"ok": True, "templates": get_templates()})
+
+
+@app.route("/templates", methods=["POST"])
+def create_template():
+    payload = request.get_json() or {}
+    name = (payload.get("name") or "").strip()
+    content = (payload.get("content") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "テンプレート名を入力してください。"}), 400
+    if not content:
+        return jsonify({"ok": False, "error": "テンプレート本文を入力してください。"}), 400
+    templates = get_templates()
+    template = {"id": uuid.uuid4().hex, "name": name, "content": content, "created_at": now_iso()}
+    templates.append(template)
+    save_templates(templates)
+    return jsonify({"ok": True, "message": f"テンプレート「{name}」を保存しました。", "template": template})
+
+
+@app.route("/templates/<template_id>/delete", methods=["POST"])
+def delete_template(template_id: str):
+    templates = get_templates()
+    updated = [t for t in templates if t.get("id") != template_id]
+    if len(updated) == len(templates):
+        return jsonify({"ok": False, "error": "テンプレートが見つかりません。"}), 404
+    save_templates(updated)
+    return jsonify({"ok": True, "message": "テンプレートを削除しました。"})
+
+
 @app.route("/health")
 def health():
     ensure_scheduler_started()
@@ -1853,6 +2603,7 @@ def health():
 if __name__ == "__main__":
     ensure_local_dirs()
     ensure_scheduler_started()
+    ensure_video_compiler_started()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
 
 
