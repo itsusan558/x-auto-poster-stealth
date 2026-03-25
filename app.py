@@ -53,7 +53,12 @@ EXISTING_PROFILE_SCRIPT = Path(__file__).with_name("existing_profile_media_post.
 VIDEO_COMPILER_DIR = Path(os.environ.get("HF_VIDEO_COMPILER_DIR", str(Path(__file__).resolve().parent.with_name("hf-video-compiler"))))
 VIDEO_COMPILER_ENTRY = VIDEO_COMPILER_DIR / "web_compiler.py"
 VIDEO_COMPILER_PORT = int(os.environ.get("HF_VIDEO_COMPILER_PORT", "7860"))
-VIDEO_COMPILER_URL = os.environ.get("HF_VIDEO_COMPILER_URL", f"http://127.0.0.1:{VIDEO_COMPILER_PORT}").strip().rstrip("/")
+_VIDEO_EXTERNAL_URL_FILE = Path(__file__).resolve().parent / "data" / "video_compiler_external_url.txt"
+VIDEO_COMPILER_URL = (
+    _VIDEO_EXTERNAL_URL_FILE.read_text(encoding="utf-8").strip()
+    if _VIDEO_EXTERNAL_URL_FILE.exists()
+    else os.environ.get("HF_VIDEO_COMPILER_URL", f"http://127.0.0.1:{VIDEO_COMPILER_PORT}").strip()
+).rstrip("/")
 DEFAULT_CHROME_PROFILE = os.environ.get("CHROME_PROFILE_DIRECTORY", "Default").strip() or "Default"
 DEFAULT_PROFILE_HANDLE = os.environ.get("X_PROFILE_HANDLE", "").strip().lstrip("@")
 VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "webm", "mkv"}
@@ -1265,12 +1270,68 @@ HTML = """
       .app{grid-template-columns:1fr}
       .sidebar{display:none}
       .stats-bar{grid-template-columns:repeat(2,1fr)}
+      .main{padding-bottom:70px}
+      .toast-wrap{bottom:calc(56px + 12px);right:12px;left:12px}
+      .toast{min-width:unset;max-width:unset;width:100%}
     }
     @media(max-width:540px){
-      .stats-bar{grid-template-columns:1fr}
-      .stat{border-right:none}
-      .compose-footer{flex-wrap:wrap;gap:8px}
+      /* Stats */
+      .stats-bar{display:flex;overflow-x:auto;scrollbar-width:none}
+      .stats-bar::-webkit-scrollbar{display:none}
+      .stat{min-width:140px;flex-shrink:0;border-right:1px solid var(--border)}
+      /* Layout */
+      .compose-area{padding:12px 14px}
+      .compose-actions{padding:6px 10px;gap:2px}
+      .compose-footer{padding:10px 14px;flex-wrap:nowrap;gap:8px}
+      .section{padding:14px}
+      .thread-item{padding:12px 14px 0}
+      /* Text */
+      .compose-textarea{font-size:16px;min-height:100px}
+      /* Larger touch targets for action buttons */
+      .compose-btn{width:44px;height:44px}
+      /* Post button - bigger on mobile */
+      .post-btn{padding:10px 22px;font-size:16px}
+      .sched-toggle-btn{padding:10px 14px!important}
+      /* Drop zone - simpler on mobile */
+      .drop-hint{margin:8px 14px;padding:14px;font-size:13px}
+      /* Hint bar hidden on mobile */
+      .hint-bar{display:none}
+      /* Media preview */
+      .compose-media-preview img,.compose-media-preview video{height:160px}
+      .compose-media-preview.count-1 img,.compose-media-preview.count-1 video{height:220px}
+      /* Schedule picker */
+      #inline-schedule-picker > div{flex-direction:column;align-items:stretch}
+      #inline-schedule-at{min-width:unset;width:100%}
+      /* Thread del button */
+      .thread-del-btn{width:36px;height:36px}
+      /* Open btn */
+      .open-btn{display:none}
+      /* Autosave text */
+      .autosave{font-size:11px}
+      /* Drop zone text */
+      .drop-hint-pc{display:none}
+      .drop-hint-sp{display:inline!important}
     }
+    .mobile-nav{
+      display:none;
+      position:fixed;bottom:0;left:0;right:0;
+      height:56px;
+      background:#16181c;
+      border-top:1px solid #2f3336;
+      flex-direction:row;
+      justify-content:space-around;
+      align-items:center;
+      z-index:100;
+    }
+    @media(max-width:900px){.mobile-nav{display:flex}}
+    .mobile-nav-btn{
+      flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:3px;background:none;border:none;color:#71767b;cursor:pointer;
+      font-size:10px;padding:6px 0;transition:color .2s;
+    }
+    .mobile-nav-btn svg{width:22px;height:22px}
+    .mobile-nav-btn.active{color:#1d9bf0}
+    .mobile-nav-btn span{font-size:10px}
   </style>
 </head>
 <body>
@@ -1392,7 +1453,8 @@ HTML = """
 
       <!-- Drop zone -->
       <div class="drop-hint" id="drop-zone">
-        ここにファイルをドロップ、またはクリックして選択
+        <span class="drop-hint-pc">ここにファイルをドロップ、またはクリックして選択</span>
+        <span class="drop-hint-sp" style="display:none">タップして画像・動画を選択</span>
       </div>
       <div id="compiler-picker"></div>
 
@@ -1558,6 +1620,31 @@ HTML = """
 
   </main>
 </div>
+
+<!-- Mobile bottom nav -->
+<nav class="mobile-nav">
+  <button class="mobile-nav-btn active" onclick="switchTab('compose')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+    <span>投稿</span>
+  </button>
+  <button class="mobile-nav-btn" onclick="switchTab('schedule')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    <span>予約</span>
+  </button>
+  <button class="mobile-nav-btn" onclick="switchTab('video')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+    <span>動画</span>
+  </button>
+  <button class="mobile-nav-btn" onclick="switchTab('templates')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    <span>テンプレ</span>
+  </button>
+  <button class="mobile-nav-btn" onclick="switchTab('log')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+    <span>ログ</span>
+  </button>
+</nav>
+
   <script>
     // ── Elements ──
     const contentEl = document.getElementById('content');
@@ -1597,10 +1684,10 @@ HTML = """
     const TAB_TITLES = {compose:'投稿', schedule:'予約管理', video:'動画編集', templates:'テンプレート', log:'ログ'};
     function switchTab(name){
       document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
-      document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+      document.querySelectorAll('.nav-item,.mobile-nav-btn').forEach(n=>n.classList.remove('active'));
       const panel = document.getElementById('panel-'+name);
       if(panel) panel.classList.add('active');
-      document.querySelectorAll('.nav-item').forEach(n=>{
+      document.querySelectorAll('.nav-item,.mobile-nav-btn').forEach(n=>{
         if(n.getAttribute('onclick')?.includes(`'${name}'`)) n.classList.add('active');
       });
       const titleEl = document.getElementById('page-title');
